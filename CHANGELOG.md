@@ -52,6 +52,24 @@ The project is at alpha; minor versions may change APIs and file layout.
   playback with an interrupt path in the ALSA and PipeWire audio backends, and
   `doctor` checks for the realtime key and WebSocket client. The key is read from
   `XAI_API_KEY`; no credential is stored in the repository.
+- Inbound call answering: helper `GET /state` and `POST /answer`, an `inbound`
+  command and `InboundWatcher` that answers ringing calls and runs one Grok Voice
+  session, and a `telephone-agent-inbound.service` user unit. Auto-answer has no
+  caller-ID filter because the helper does not request `READ_CALL_LOG`.
+- Opening greeting: the configured `[realtime].greeting` is spoken once SCO audio is
+  ready.
+- Opt-in local call transcripts: `[transcript]` writes one timestamped JSONL file per
+  call with full conversation detail, mode `0600` in a `0700` directory under
+  `runtime/transcripts` by default. Audio is not persisted.
+
+### Fixed
+
+- The dial helper no longer rejects `/call` from a stale ten-minute window. It checks
+  Telecom call state before rejecting and clears the window on a refused hangup when no
+  call is active.
+- Local call transcripts keep full details, including full E.164 numbers and verbatim
+  callee and agent text, instead of masking them. Operational stdout and journald logs
+  remain masked.
 
 ## [0.1.0] - 2026-10-24
 

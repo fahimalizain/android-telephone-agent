@@ -11,9 +11,13 @@ gadget does not enumerate or route reliably on the phone. The USB guide is
 [Raspberry Pi setup](./raspberry-pi-setup.md); the decision is recorded in
 [ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
 
-Status: validated with a Linux laptop and a Samsung Galaxy A23. The Raspberry Pi Zero 2 W
-is expected to work but is **unverified**. No PSTN call has been tested over Bluetooth;
-the audio path was validated on a Google Meet call.
+Status: validated end to end with a Linux laptop (BlueZ 5.85, PipeWire 1.6.2,
+WirePlumber 0.5.13) and a Samsung Galaxy A23 4G (SM-A235F) on the onboard adapter.
+Outbound PSTN calls were placed through the LAN helper, audio ran over HFP SCO at mSBC
+16 kHz in both directions, and the Grok Voice realtime adapter held a real conversation.
+The Raspberry Pi Zero 2 W is expected to work but is **unverified**. Inbound answering is
+implemented but no live inbound PSTN call has been validated, and latency has not been
+measured.
 
 ## 1. Topology
 
@@ -51,18 +55,36 @@ hard-coded `.0` or `.1`.
 | Item | Result |
 |---|---|
 | Host | Linux laptop (MSI GL738SE), Ubuntu, BlueZ 5.85, PipeWire 1.6.2, WirePlumber 0.5.13 |
-| Phone | Samsung Galaxy A23 |
+| Phone | Samsung Galaxy A23 4G (SM-A235F) |
+| Adapter | Onboard Bluetooth adapter |
 | Adapter roles | Headset (UUID 0x1108) and Handsfree (UUID 0x111e) advertised |
 | Phone UI | **Calls and audio** enabled for the host |
 | HFP link | `/Profile/HFPHF`, `AT+CLIP`, `AT+CCWA`, `AT+CMEE`, `AT+CLCC`, `AT+VGS`, `AT+VGM`; AG indicators for call, call setup, service, signal, and battery |
-| Audio path | Bidirectional during an active Google Meet call, through the laptop speaker and microphone |
+| Audio path | Bidirectional over SCO during outbound PSTN calls; a Grok Voice realtime conversation completed 5 turns in 68.1 s |
+| Call control | Call placed through the LAN helper; the model requested `end_call` and `POST /hangup` returned `202` |
 | Codec | mSBC, 16 kHz; `api.bluez5.profile = "headset-audio-gateway"`, `media.role = Communication` |
 | SCO nodes | `bluez_input...` source for the downlink, `bluez_output...` sink for the uplink |
 | Tools | `pw-record` captured the SCO source; `pw-play` injected a test tone into the SCO sink |
-| Not validated | A PSTN call over Bluetooth; the Pi Zero 2 W; HFP call control from Linux |
+| Link quality | RSSI about -87 dBm; the first call dropped the Bluetooth link during setup and needed a manual reconnect, later calls were stable |
+| Not validated | The Pi Zero 2 W; HFP call control from Linux; a live inbound PSTN call; latency measurements; the USB UAC1 gadget |
 
 The cellular codec still caps fidelity. mSBC gives a 16 kHz link between the phone and the
 host, but an AMR-NB network leg remains 8 kHz.
+
+### Inbound calls
+
+The HFP link also carries inbound audio, but Bluetooth exposes no ringing signal or caller
+ID to user space. The helper is the signaling path: `GET /state` reports `ringing`,
+`offhook`, `idle`, or `unknown`, and `POST /answer` asks Telecom to answer. PipeWire creates
+the SCO source and sink only **after** the call is answered, so the watcher answers first
+and then starts audio; `[realtime].greeting` is spoken once those nodes are ready.
+
+Auto-answer has no caller-ID filter. The helper does not request `READ_CALL_LOG`, and
+`/state` returns only a phase. Inbound and outbound calls are mutually exclusive: the
+helper rejects `/call` while a call is ringing or active, and the watcher waits for `idle`
+before re-arming. The daemon is unit-tested; the helper endpoints are implemented, but no
+live inbound PSTN call has been validated over Bluetooth or USB. See
+[Inbound calls](./inbound.md).
 
 ## 3. Host prerequisites
 
@@ -441,29 +463,42 @@ journalctl --user -u telephone-agent-bluetooth.service -f
 | Choppy audio, dropouts, or high latency | 2.4 GHz Wi-Fi coexistence, distance, or SCO retransmission | `pw-top`, `iw dev wlan0 link`, distance to the phone | Move the host and phone closer, change the Wi-Fi channel, reduce 2.4 GHz load |
 | Logs show CVSD instead of mSBC | Phone or adapter did not negotiate wideband | `./scripts/bluetooth-check.sh <mac>` during a call, or `wpctl inspect <node-id>` | No fix if the phone does not support it; the call still works at 8 kHz |
 | Agent reports an audio error when the call ends | SCO nodes disappeared with the call | Agent log, `pw-dump` after hangup | Expected; end the session cleanly and let the next call rediscover the nodes |
+| Service not running for inbound | Helper is reachable but the agent never answers | `systemctl --user status telephone-agent-inbound.service`, `journalctl --user -u telephone-agent-inbound.service -n 100` | Start or fix the unit; it must run in the PipeWire user session and use `realtime.kind = "grok"` |
+| Phone rings but no SCO nodes appear | SCO exists only after the call is answered, or the phone kept audio on the earpiece | `curl` the helper's `/state`, phone call screen, `pw-dump` | Answer through `POST /answer` first; confirm **Calls and audio** and the Bluetooth route during the call |
+| `/answer` returns `403` | `ANSWER_PHONE_CALLS` is missing, or Android denied `acceptRingingCall()` | Helper log, app permissions | Grant the permission and unlock the phone; answering as a non-default dialer is best effort |
+| `/answer` returns `409` | The call stopped ringing, was answered manually, or the state is unreadable | `GET /state` | Expected race or state failure; do not retry, wait for the next call |
+| `/answer` returns `500` | Android threw while trying to answer | Helper log, `adb logcat -s DialHelper` | Unlock the phone, check vendor restrictions, and retry a supervised call |
 | Pairing is lost after a phone reboot | Device not trusted, or the phone did not reconnect | `bluetoothctl info <address>` | Trust the device, connect manually once, and verify before the next scheduled call |
 
 ## 12. Limitations
 
-- **No PSTN validation.** The validated call was Google Meet on the phone. A cellular call
-  should use the same HFP route, but it has not been tested end to end.
 - **Pi Zero 2 W unverified.** The validated host was a laptop. The Pi's onboard Bluetooth
   and single 2.4 GHz radio are expected to work but need a supervised test. Coexistence
   with Wi-Fi is the main unknown.
-- **No HFP call control.** The agent does not send `ATD`, `ATA`, or `CHUP`. Dialing and
-  hangup still require the LAN helper and a reachable phone.
+- **Inbound is not live-validated.** The helper endpoints and the `inbound` daemon are
+  implemented; the daemon is unit-tested, but no live inbound PSTN call has been exercised
+  over Bluetooth or USB. Bluetooth cannot signal a ringing call; the helper must answer
+  before SCO nodes exist.
+- **Weak links drop.** The validated run had RSSI around -87 dBm. The first call dropped
+  the Bluetooth link during setup and needed a manual reconnect, although later calls were
+  stable. Treat a drop during setup as a known failure mode rather than a code bug.
+- **Latency is unmeasured.** Turn-taking worked in the realtime conversation, but no
+  end-to-end latency measurement was recorded against the budget.
+- **No HFP call control.** The agent does not send `ATD`, `ATA`, or `CHUP`. Dialing,
+  answering, and hangup still require the LAN helper and a reachable phone.
 - **SCO nodes are call-scoped.** They do not exist while the phone is idle. The agent waits
   up to `node_timeout_s`; if the nodes never appear, the call fails before audio starts.
 - **User-session coupling.** The agent must run as the PipeWire user. A system service or a
   different account does not share that session, so it cannot see the SCO nodes.
 - **Codec limits.** mSBC is 16 kHz. The cellular codec still caps the call, and a fallback
   to CVSD reduces the host link to 8 kHz.
-- **One phone, one call.** HFP is point-to-point in this design; concurrency needs another
-  host and phone pair.
+- **One phone, one call.** HFP is point-to-point in this design; inbound and outbound share
+  the same call slot, and concurrency needs another host and phone pair.
 - **Reconnection is best effort.** Pairing and trust help, but a reboot, adapter reset, or
   WirePlumber restart can leave the phone disconnected.
 - **USB remains the default.** This path is an alternative, not a replacement. The USB
-  gadget, its scripts, and its system-level service remain supported.
+  gadget, its scripts, and its system-level service remain supported, though the USB path
+  itself is not yet hardware-validated.
 
 ## Related documents
 

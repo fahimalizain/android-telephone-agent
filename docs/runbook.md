@@ -264,12 +264,67 @@ alert rather than retrying a failing endpoint.
 
 **Prevent.** Alert on balance and key expiry, configure two providers where possible, and run the T-60 provider check.
 
+## 13. Inbound service not answering
+
+**Symptom.** A call to the agent SIM rings but the agent never answers, or the inbound service is stopped.
+**Impact.** Missed inbound calls; the phone may stay offhook and block the next call; S2.
+**Diagnose.** Run the user-unit commands as the account that owns the PipeWire session:
+
+```bash
+systemctl --user status telephone-agent-inbound.service --no-pager
+journalctl --user -u telephone-agent-inbound.service -n 120 --no-pager
+read -rsp 'Helper token: ' HELPER_TOKEN; echo
+curl -fsS --max-time 3 -H "Authorization: Bearer $HELPER_TOKEN" \
+  "http://$PHONE_HOST:8765/state"
+unset HELPER_TOKEN
+```
+
+Expect `active (running)`, no `inbound requires realtime.kind = 'grok'` error, and a
+`{"state":"..."}` response. A call should move from `ringing` to `offhook` within about one
+poll interval after the daemon answers. For a supervised check, call the agent SIM from
+another handset and watch `/state` and the journal through answer, greeting, and hangup.
+Confirm `[realtime].kind = "grok"` and that the service environment has `XAI_API_KEY`.
+
+**Fix.** Start or restart the unit with `systemctl --user restart
+telephone-agent-inbound.service`. If `/answer` returns `403`, grant `ANSWER_PHONE_CALLS`
+and unlock the phone: `acceptRingingCall()` is best effort for a non-default dialer. A `409`
+means the call stopped ringing or was answered manually. A `500` means Android threw; check
+the helper log. If the unit cannot see PipeWire, run it in the PipeWire user session and
+enable lingering. If the state is `offhook` but the caller hears silence, check the SCO
+nodes with `scripts/bluetooth-check.sh <mac>` during the call.
+
+**Prevent.** Run one supervised inbound call after each phone or One UI update, keep the
+unit enabled with `Restart=always`, and alert when the unit is inactive or the helper has
+not reached `idle` after a call.
+
+## 14. Transcript retention and cleanup
+
+Local transcripts are opt-in and contain full phone numbers and verbatim conversation
+text. Keep a documented retention period, for example 30 days, and delete files on the
+device rather than copying them into tickets, chat, or backups that do not cover call
+content.
+
+```bash
+export TRANSCRIPT_DIR="${TRANSCRIPT_DIR:-$REPO/runtime/transcripts}"
+ls -ld "$TRANSCRIPT_DIR"
+find "$TRANSCRIPT_DIR" -maxdepth 1 -name '*.jsonl' -printf '%m %u:%g %p\n'
+du -sh "$TRANSCRIPT_DIR"
+find "$TRANSCRIPT_DIR" -maxdepth 1 -name '*.jsonl' -mtime +30 -print
+```
+
+The directory should be mode `700` and files mode `600`, owned by the service user. Review
+the `find` output before deleting; then append `-delete` to the same command. Deletion on
+an SD card is not a secure erase, so do not use production conversations for testing. If
+`[transcript].enabled` is false, neither the directory nor any files should exist.
+
 ## After an incident
 
 Record the times, slot, error, action, and test result. Update this runbook if a command was wrong. Do not close an S1 until a real two-way call succeeds; review alerts for noise that hid the signal.
 
 ## Related documents
 
-[Operations](./operations.md), [troubleshooting](./troubleshooting.md), [Bluetooth HFP](./bluetooth-hfp.md),
-[hardware](./hardware.md), [Raspberry Pi setup](./raspberry-pi-setup.md), [Android setup](./android-setup.md), and the
+[Operations](./operations.md), [troubleshooting](./troubleshooting.md),
+[Bluetooth HFP](./bluetooth-hfp.md), [Inbound calls](./inbound.md),
+[hardware](./hardware.md), [Raspberry Pi setup](./raspberry-pi-setup.md),
+[Android setup](./android-setup.md), and the
 [service unit](../scripts/systemd/telephone-agent.service).

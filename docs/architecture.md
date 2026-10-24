@@ -32,8 +32,9 @@ Non-goals:
 - Intercepting or recording a call already in progress on the owner's phone.
 - Root, bootloader unlocking, custom firmware, or vendor HAL changes.
 - VoIP or SIP; the call leg is cellular.
-- Inbound PSTN calls in the first milestone. Inbound control-plane tasking over MCP and
-  A2A is in scope.
+- Inbound PSTN calls in the first milestone. The opt-in v0.3 inbound mode now answers
+  them, but it has not been validated on a live call; see [Inbound calls](./inbound.md).
+  Inbound control-plane tasking over MCP and A2A is in scope.
 - More than one concurrent call per phone and Pi pair.
 - Local speech models on the Zero 2 W (stretch goal on a Pi 4 or Pi 5).
 - A consumer product, enclosure design, or support contract.
@@ -145,10 +146,10 @@ a systemd user service with lingering. The system-level one-shot unit used for t
 does not work unchanged. See [Bluetooth HFP](./bluetooth-hfp.md) and
 [ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
 
-This variant was validated on a Linux laptop with a Samsung Galaxy A23: mSBC at 16 kHz,
-bidirectional audio during a Google Meet call, and both SCO directions confirmed with
-`pw-record` and `pw-play`. A PSTN call over Bluetooth and the Pi Zero 2 W were not tested;
-the Pi is expected to work but is unverified. The cellular codec still caps fidelity.
+This variant was validated end to end on a Linux laptop with a Samsung Galaxy A23 4G over
+outbound PSTN calls: mSBC at 16 kHz in both directions, with the Grok Voice realtime
+adapter holding a five-turn conversation. The Pi Zero 2 W, live inbound calls, and latency
+measurements remain unvalidated. The cellular codec still caps fidelity.
 
 ## Control plane: MCP and A2A
 
@@ -387,8 +388,9 @@ Cloud providers receive call audio and, on the text path, transcripts; this is a
 deliberate trade-off in [ADR 0004](./decisions/0004-cloud-voice-stack-first.md).
 The optional Grok Voice realtime adapter sends audio to xAI instead and is covered
 by [ADR 0008](./decisions/0008-use-grok-voice-realtime-adapter.md). The reference
-pipeline does not persist audio; logs should redact full numbers and omit
-transcripts.
+pipeline does not persist audio. Operational logs should redact full numbers and omit
+transcripts; the opt-in local transcript described in section 12 is a separate file that
+contains full detail.
 
 A power cut is asymmetric: Phone A survives on its battery, but the Pi and router stop
 unless the UPS covers them, so a call in progress fails. See
@@ -439,7 +441,9 @@ room noise enters both directions, and speakerphone mode may be required.
 ## 11. Capacity and limits
 
 - **One call at a time per phone and Pi pair, including the Zero 2 W.** One SIM, radio,
-  audio transport, and audio loop; concurrency needs more pairs, not threads. Inbound calls collide.
+  audio transport, and audio loop; concurrency needs more pairs, not threads. Inbound and
+  outbound calls share the same call slot and are serialized: the helper rejects `/call`
+  while a call is ringing or active.
 - **The Zero 2 W suits a network-bound pipeline.** Audio and resampling are small next
   to cloud STT, LLM, and TTS. Its 512 MB rules out local models, and journald is
   volatile; the ledger is the small persistent exception.
@@ -465,20 +469,30 @@ goes to the ledger and the daily heartbeat; a missing heartbeat is itself an ale
 The heartbeat reports helper reachability, audio backend availability (USB gadget
 enumeration or Bluetooth SCO nodes), call duration, and the last outcome.
 
-Audio and transcripts are not persisted or logged by default. Debug captures are
-opt-in, time-bounded, and deleted after review. [Runbook](./runbook.md) covers weekly
-log review and the monthly battery check.
+Audio is not persisted. Local transcripts are opt-in with `[transcript].enabled = true`:
+one timestamped JSONL file per call, created with mode `0600` in a directory with mode
+`0700`, under `runtime/transcripts` by default. When enabled they contain full personal
+data: full E.164 numbers where known (inbound calls have no caller ID), verbatim callee and
+agent text, and call metadata. They are not redacted and are not the same as the
+operational stdout/journald logs, which remain masked. Keep them on-device and apply a
+retention or deletion policy. Audio debug captures are opt-in, time-bounded, and deleted
+after review. [Runbook](./runbook.md) covers weekly log review and the monthly battery
+check.
 
 ## 13. Open questions
 
-Carried from the [design brief](./design-brief.md); not resolved here.
+Carried from the [design brief](./design-brief.md); status as of 2026-10-24.
 
 1. **Language.** Malayalam, English, or code-mixed; Sarvam supports Malayalam, but
    code-mixed quality varies by vendor and needs evaluation.
 2. **Helper app.** Reference Kotlin app or Tasker/MacroDroid for the first milestone.
 3. **Local fallback models.** Pi 4 or Pi 5 with Whisper.cpp and Piper, or cloud-only.
 4. **Call content and persona.** Briefing, check-in, or reminder; prompt design is out of scope.
-5. **Inbound calls.** Whether to support them; changes the state machine and privacy model.
+5. **Inbound calls. Implemented, pending live validation.** The helper exposes
+   `GET /state` and `POST /answer`; an `inbound` daemon polls and answers every ringing
+   call, then runs one Grok Voice session. Bluetooth carries audio only, so the SCO nodes
+   appear after the answer, not while ringing. There is no caller-ID filter. See
+   [Inbound calls](./inbound.md).
 
 ## 14. Related documents
 

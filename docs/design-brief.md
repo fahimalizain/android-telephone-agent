@@ -41,7 +41,9 @@ ships in the alpha and what remains follow-up work.
   and a reference software scaffold.
 - Not an inbound PSTN call service in the first milestone. Inbound **control-plane
   tasking** over MCP and A2A is in scope: another agent may ask this agent to place an
-  outbound call. A person dialing the agent's SIM is still not answered by the agent.
+  outbound call. A person dialing the agent's SIM is still not answered by the default
+  configuration; an opt-in v0.3 inbound mode is implemented but not live-validated. See
+  [Inbound calls](./inbound.md).
 
 ## 3. Why the obvious approaches do not work
 
@@ -104,8 +106,9 @@ charge from a separate supply because its USB port is not the audio link.
 The trade-offs are pairing and reconnection, call-scoped SCO nodes, a shared 2.4 GHz radio,
 and the requirement that the agent run in the same user session as PipeWire and
 WirePlumber. Dialing and hangup still go through the LAN helper; HFP AT call control is not
-implemented. The path was validated on a Linux laptop with a Galaxy A23 and a Google Meet
-call, not on the Pi Zero 2 W and not on a PSTN call. See
+implemented. The path was validated end to end on a Linux laptop with a Galaxy A23 4G
+over outbound PSTN calls, including a Grok Voice realtime conversation. The Pi Zero 2 W,
+live inbound calls, and latency measurements remain unvalidated. See
 [Bluetooth HFP](./bluetooth-hfp.md) and
 [ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
 
@@ -334,6 +337,7 @@ docs/
   power-and-thermal.md
   raspberry-pi-setup.md
   bluetooth-hfp.md
+  inbound.md
   android-setup.md
   dial-helper.md
   voice-agent.md
@@ -359,6 +363,7 @@ scripts/
   systemd/telephone-agent.timer
   systemd/telephone-agent-bluetooth.service
   systemd/telephone-agent-bluetooth.timer
+  systemd/telephone-agent-inbound.service
 agent/
   pyproject.toml
   README.md
@@ -384,3 +389,10 @@ android-helper/
 4. Call content and persona: daily briefing, check-in, or reminder. Prompt design is
    out of scope for the first milestone.
 5. Whether to support inbound PSTN calls as well as outbound.
+
+   **Resolved (2026-10-24).** Implemented as an opt-in `inbound` daemon: the helper
+   exposes `GET /state` and `POST /answer`, and the daemon polls, answers, and runs one
+   Grok Voice session per call. Bluetooth carries audio only, so HFP has no ringing signal
+   and the SCO nodes appear only after the call is answered. It answers every call with no
+   caller-ID filter, and no live inbound PSTN call has been validated. See
+   [Inbound calls](./inbound.md).

@@ -49,13 +49,20 @@ speaker, not to the remote party. Android also restricts background audio and ca
 make an unattended agent fragile. The architecture deliberately moves the agent to the headset side of
 the call. See the [design brief](./design-brief.md).
 
-## Is audio recorded?
+## Does it record or transcribe calls?
 
-No, not by default. Audio is streamed through the pipeline and is not written to disk. On the default
-text path, audio is sent to the configured STT provider and the resulting text is processed by the LLM
-and TTS provider. With `realtime.kind = "grok"`, call audio is sent to xAI's speech-to-speech API
-instead. Provider retention policies apply either way. A debug capture should be opt-in, consented,
-short, and deleted afterward. See [operations](./operations.md).
+It transcribes speech to drive the conversation, but it does not record audio: audio is
+streamed and not written to disk. Local transcripts are opt-in with
+`[transcript].enabled = true`. When enabled, the runtime writes one timestamped JSONL file
+per call, created with mode `0600` in a `0700` directory, containing the full E.164 number
+when known (inbound calls have no caller ID), verbatim callee and agent text, and call
+metadata. The file stays on-device and is
+intentionally not masked, unlike the operational stdout and journald logs. Delete
+transcripts on a retention schedule. On the text path, audio goes to the configured STT
+provider and text to the LLM and TTS providers; with `realtime.kind = "grok"`, audio goes to
+xAI instead. Provider retention policies apply either way. A debug audio capture, if
+enabled, should be opt-in, consented, short, and deleted afterward. See
+[operations](./operations.md) and [Inbound calls](./inbound.md).
 
 ## Is this legal? What about TRAI and TCPA?
 
@@ -95,11 +102,19 @@ One Pi and one phone place one call at a time. You can schedule sequential calls
 phone to return to idle, or run one phone and one Pi per number. Parallel calls on one gadget are not
 supported, and a conferencing bridge is out of scope. See [operations](./operations.md).
 
-## Can it receive calls?
+## Can it answer inbound calls?
 
-Not in the reference version, which is outbound-only. Inbound answering is an open question in the
-design, and the helper's call control would need additional work. Do not assume the agent will answer
-if someone calls the SIM. See the [design brief](./design-brief.md).
+Yes, as an opt-in mode. `telephone-agent inbound`, or the
+`telephone-agent-inbound.service` user unit, polls the helper's `GET /state`, calls
+`POST /answer` on a ringing call, and runs one Grok Voice realtime session. The daemon is
+unit-tested, but no live inbound PSTN call has been validated yet.
+
+It answers **every** ringing call on the agent SIM. There is no caller-ID filter, allowlist,
+or screening because the helper does not request `READ_CALL_LOG`. `acceptRingingCall()` is
+best effort for a non-default dialer and may fail on a locked screen or a vendor build
+(`403`/`500`). Bluetooth carries audio only: HFP has no ringing signal, and SCO nodes appear
+only after the call is answered. Inbound and outbound share one call slot. Use a SIM
+dedicated to the agent. See [Inbound calls](./inbound.md).
 
 ## Can it send SMS or WhatsApp?
 
@@ -130,8 +145,9 @@ a SCO source and sink. USB remains the default and canonical path. The caveats a
 pairing and reconnection add failure modes, SCO nodes exist only during a call, the agent
 must run in the same user session as PipeWire/WirePlumber, and Bluetooth shares 2.4 GHz
 spectrum with Wi-Fi. mSBC gives a 16 kHz link, but the cellular codec still caps fidelity.
-Dialing and hangup still go through the LAN helper. The path was validated on a laptop
-with a Galaxy A23 and a Google Meet call, not on a Pi Zero 2 W or a PSTN call. See
+Dialing and hangup still go through the LAN helper. The path has been validated end to end
+on a laptop with a Galaxy A23 4G over outbound PSTN calls, including a Grok Voice
+conversation, but not on a Pi Zero 2 W, live inbound calls, or end-to-end latency. See
 [Bluetooth HFP](./bluetooth-hfp.md) and
 [ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
 

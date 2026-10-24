@@ -10,7 +10,11 @@ Related: [Raspberry Pi setup](./raspberry-pi-setup.md), [Android setup](./androi
 
 For the Bluetooth HFP alternative, start with [Bluetooth HFP](./bluetooth-hfp.md). The
 USB enumeration and ALSA sections below apply to the UAC1 gadget; Bluetooth failures are
-diagnosed with `bluetoothctl`, `pw-dump`, and the WirePlumber journal instead.
+diagnosed with `bluetoothctl`, `pw-dump`, and the WirePlumber journal instead. For
+inbound-answer failures, including `/answer` 403/409/500, ringing with no SCO nodes, and
+the inbound service not starting, see the existing table in
+[Inbound calls](./inbound.md#limits-and-troubleshooting) and the inbound rows in
+[Bluetooth HFP](./bluetooth-hfp.md#11-troubleshooting).
 
 Work from the bottom of the stack upward: power, USB enumeration, ALSA, Android routing, helper, network,
 agent. A fault at a lower layer produces misleading errors at every layer above it. Change one thing at

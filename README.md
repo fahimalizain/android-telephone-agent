@@ -28,6 +28,10 @@ unavailable or inconvenient; USB remains the default and canonical path. See the
 [Bluetooth HFP guide](docs/bluetooth-hfp.md) and
 [ADR 0006](docs/decisions/0006-use-bluetooth-hfp-audio.md).
 
+An opt-in inbound mode can also answer calls to the agent SIM and connect them to the
+Grok Voice realtime adapter. It is implemented but has not yet been validated on a live
+inbound PSTN call; see [Inbound calls](docs/inbound.md).
+
 Other agents can delegate calls to the runtime over MCP and A2A; one process serves both
 endpoints from a single call queue. The control plane uses one shared admin-level bearer
 token and does not yet enforce a
@@ -38,7 +42,10 @@ trusted network. See the [interoperability guide](docs/interop.md).
 
 - Not an interception or injection tool for a call already in progress on your phone.
 - Not a root, Magisk, or Xposed project. Root is explicitly out of scope.
-- Not a call recorder or surveillance product. Audio persistence is off by default.
+- Not a call recorder or surveillance product. Call audio is not persisted; the optional
+  local transcript is an opt-in text file.
+- Not a call screener. The opt-in inbound mode answers every ringing call on the agent
+  SIM; there is no caller-ID filter, allowlist, or screening.
 - Not a VoIP or SIP client. The call leg is a genuine cellular call.
 - Not a finished product. APIs, file layout, and hardware guidance may change.
 
@@ -152,6 +159,7 @@ docs/
   power-and-thermal.md
   raspberry-pi-setup.md
   bluetooth-hfp.md
+  inbound.md
   android-setup.md
   dial-helper.md
   voice-agent.md
@@ -178,6 +186,7 @@ scripts/
   systemd/telephone-agent.timer
   systemd/telephone-agent-bluetooth.service
   systemd/telephone-agent-bluetooth.timer
+  systemd/telephone-agent-inbound.service
 agent/
   pyproject.toml
   README.md
@@ -212,17 +221,30 @@ The map matches the layout described in section 14 of the design brief.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| v0 | Manual dial, USB gadget enumeration, and loopback audio verification | In progress: helper builds and installs; hardware validation pending |
+| v0 | Manual dial, USB gadget enumeration, and loopback audio verification | In progress: Bluetooth HFP validated end to end on a laptop; USB gadget and Pi Zero 2 W validation pending |
 | v0.1 | Scheduler, one call per slot, bounded retries, heartbeat and alerting | Planned |
 | v0.2 | Barge-in, endpointing, streaming STT/LLM/TTS, latency measurement against the budget | Planned |
-| v0.3 | Inbound calls | Exploratory |
+| v0.3 | Inbound calls | Implemented; daemon unit-tested; live inbound PSTN validation pending |
 
-The Android helper now builds from `android-helper/` with Gradle and produces an
-installable APK. No physical phone, SIM, USB-audio, or end-to-end hardware validation has
-been recorded yet, so v0 remains in progress.
+The Android helper builds from `android-helper/` with Gradle and produces an
+installable APK. On 2026-10-24 the Bluetooth HFP path was validated end to end on a Linux
+laptop (BlueZ 5.85, PipeWire 1.6.2, WirePlumber 0.5.13) with a Samsung Galaxy A23 4G
+(SM-A235F) and its onboard adapter. Outbound PSTN calls were placed through the LAN
+helper, audio ran over HFP SCO at mSBC 16 kHz in both directions, and the Grok Voice
+realtime adapter held a real conversation. One recorded run completed five turns in
+68.1 s: the model requested `end_call` and the helper accepted `/hangup` with `202`.
+The run also exposed a stale ten-minute call window in the helper, which now checks
+Telecom call state before rejecting `/call`.
 
-Milestones are sequential. v0.3 depends on open questions about call control and is not
-committed. See [docs/design-brief.md](docs/design-brief.md) section 15.
+That run validates the Bluetooth path on a laptop. It does not validate the canonical
+USB UAC1 gadget, the Raspberry Pi Zero 2 W, live inbound PSTN calls, or latency. The
+Bluetooth link was weak (RSSI about -87 dBm), and the first call dropped the link during
+setup and needed a manual reconnect; later calls were stable.
+
+Milestones are sequential in the plan. Inbound (v0.3) now has an implementation, but it
+depends on the helper's call-state API and has not been exercised on a live inbound call.
+See [docs/design-brief.md](docs/design-brief.md) section 15 and
+[docs/inbound.md](docs/inbound.md).
 
 ## Safety, privacy, and legal
 
@@ -239,17 +261,40 @@ persist audio, and keep phone numbers, SIM identifiers, API keys, and helper tok
 of the repository. The helper endpoint binds to a private interface, requires a bearer
 token, and must not be port-forwarded. See [SECURITY.md](SECURITY.md).
 
+Local transcripts are opt-in with `[transcript].enabled = true`. When enabled, the agent
+writes one timestamped JSONL file per call under `runtime/transcripts` by default. These
+files contain the full E.164 number when one is known (inbound calls have no caller ID),
+the verbatim callee and agent text, and call metadata: direction, objective, audio backend,
+realtime model and voice, duration, and result. They are created with mode `0600` in a
+directory with mode `0700` and stay on the device. They are intentionally **not** masked and
+are not the same as the operational stdout and journald logs, which remain masked. Treat
+them as personal data, keep them out of backups you do not control, and delete them on a
+retention schedule. Call audio itself is not written to disk.
+
 ## Status and limitations
 
 - Alpha. The voice runtime is a reference scaffold; there is no stable release.
 - UAC1 behavior must be verified on each phone and Android build. Android compatibility
-  is likely but not guaranteed, and vendor audio routing can differ.
+  is likely but not guaranteed, and vendor audio routing can differ. The USB gadget has
+  not yet been validated on hardware.
+- Bluetooth HFP is validated on a Linux laptop with a Galaxy A23, not on the Raspberry Pi
+  Zero 2 W, and not with live inbound calls. The validated link was weak (RSSI about
+  -87 dBm), and the first call dropped Bluetooth during setup and needed a manual
+  reconnect.
+- Inbound answering is opt-in and answers every ringing call on the agent SIM. The helper
+  does not request `READ_CALL_LOG`, so there is no caller-ID filter, allowlist, or
+  screening. Use a SIM dedicated to the agent.
+- `acceptRingingCall()` is best effort for a non-default dialer. Android may deny or
+  ignore the answer on a locked screen or a vendor build; the helper reports `403` or
+  `500`, and the daemon keeps polling.
 - The Android helper app is a reference, not a supported product. Ending a call through
   `TelecomManager.endCall()` requires privileged access on modern Android, so the
   fallback path may be the only option on some devices.
-- The latency budget is a target, not a measurement on this hardware.
-- One phone, one SIM, and one call at a time. Local speech models remain a stretch goal;
-  the Pi Zero 2 W is not expected to run them comfortably.
+- The latency budget is a target, not a measurement on this hardware, including the
+  Bluetooth run.
+- One phone, one SIM, and one call at a time. Inbound and outbound calls share that slot
+  and are serialized. Local speech models remain a stretch goal; the Pi Zero 2 W is not
+  expected to run them comfortably.
 
 ## Documentation and contributing
 
