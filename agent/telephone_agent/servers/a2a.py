@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping
 
 from a2a.helpers import new_text_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -24,6 +25,7 @@ from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill, Message
 from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, TransportProtocol
+from google.protobuf import json_format
 from starlette.applications import Starlette
 from starlette.routing import Route
 
@@ -74,8 +76,8 @@ def build_agent_card(*, url: str) -> AgentCard:
             streaming=True,
             push_notifications=False,
         ),
-        default_input_modes=["text/plain"],
-        default_output_modes=["text/plain"],
+        default_input_modes=["text/plain", "application/json"],
+        default_output_modes=["text/plain", "application/json"],
         skills=[
             AgentSkill(
                 id="place_phone_call",
@@ -86,8 +88,8 @@ def build_agent_card(*, url: str) -> AgentCard:
                     "Call the clinic and ask whether the 3 pm slot is free.",
                     "Call the courier and reschedule tomorrow's pickup.",
                 ],
-                input_modes=["text/plain"],
-                output_modes=["text/plain"],
+                input_modes=["text/plain", "application/json"],
+                output_modes=["text/plain", "application/json"],
             )
         ],
     )
@@ -119,17 +121,20 @@ class CallAgentExecutor(AgentExecutor):
         updater = TaskUpdater(event_queue, a2a_task_id, context_id)
         call_id = self._calls.get(a2a_task_id)
 
+        request = _request_data(context)
+
         if call_id is None:
             if context.current_task is not None:
                 await updater.failed(_agent_message("This call is no longer active.", updater))
                 return
 
-            objective = context.get_user_input().strip()
+            objective = _string_field(request, "objective") or context.get_user_input().strip()
             if not objective:
                 await updater.reject(_agent_message("An objective is required.", updater))
                 return
 
-            task = await self._service.submit(objective=objective)
+            number = _string_field(request, "number") or _string_field(request, "to")
+            task = await self._service.submit(objective=objective, number=number)
             call_id = task.id
             self._calls[a2a_task_id] = call_id
             await updater.submit()
@@ -137,7 +142,7 @@ class CallAgentExecutor(AgentExecutor):
             await self._stream(call_id, updater, skip_at=None)
             return
 
-        answer = context.get_user_input().strip()
+        answer = _string_field(request, "answer") or context.get_user_input().strip()
         if answer:
             # A False result means the consultation timed out or was already
             # resolved. Do not fail the task: keep observing the live call.
@@ -273,6 +278,38 @@ def create_a2a_app(
         exempt_paths=("/health", "/.well-known/agent-card.json"),
     )
     return app
+
+
+def _request_data(context: RequestContext) -> dict[str, object]:
+    """Merge the message's structured data parts into one mapping.
+
+    A2A clients may send a data part with ``objective``, ``number`` (or
+    ``to``), and, when resuming, ``answer``. Plain text messages remain
+    supported; the executor falls back to the text part.
+    """
+
+    message = getattr(context, "message", None)
+    if message is None:
+        return {}
+
+    data: dict[str, object] = {}
+    for part in message.parts:
+        if part.WhichOneof("content") != "data":
+            continue
+        value = json_format.MessageToDict(part.data, preserving_proto_field_name=True)
+        if isinstance(value, dict):
+            data.update(value)
+    return data
+
+
+def _string_field(data: Mapping[str, object], name: str) -> str | None:
+    """Return a stripped non-empty string field, or ``None``."""
+
+    value = data.get(name)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
 
 
 def _task_identifiers(context: RequestContext) -> tuple[str, str]:

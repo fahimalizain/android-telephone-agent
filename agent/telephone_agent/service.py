@@ -25,10 +25,9 @@ the broker, which wakes the call thread.
 
 Tasks and their event history live in memory; a restart loses them. The
 optional audit log is append-only JSONL and records every emitted
-:class:`TaskEvent`. Note that a ``finished`` event carries
-:meth:`CallTask.to_dict`, which includes the transcript. Operators who treat
-transcripts as personal data should apply the retention rules in the
-interoperability guide.
+:class:`TaskEvent` with a wall-clock timestamp. The objective and transcript
+are personal data: they are omitted from the final ``finished`` audit record
+even though the in-memory event carries them.
 """
 
 from __future__ import annotations
@@ -45,6 +44,7 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -740,11 +740,21 @@ class CallService:
         path = self._audit_path
         if path is None:
             return
+
+        # The final snapshot carries the objective and transcript, which are
+        # personal data. Keep them out of the audit log; callers that need the
+        # transcript read it from the task before it leaves memory.
+        data = dict(event.data)
+        if event.kind == "finished":
+            data.pop("objective", None)
+            data.pop("transcript", None)
+
         record = {
+            "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "at": event.at,
             "kind": event.kind,
             "task_id": event.task_id,
-            "data": event.data,
+            "data": data,
         }
         try:
             with self._audit_lock:

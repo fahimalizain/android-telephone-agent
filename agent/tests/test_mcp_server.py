@@ -358,3 +358,48 @@ def test_mcp_initialize_and_tools_list_over_asgi() -> None:
             }
 
     asyncio.run(scenario())
+
+
+def test_public_url_is_allowed_through_a_reverse_proxy_host_header() -> None:
+    async def scenario() -> None:
+        service = CallService(
+            session_factory=lambda **_: _Session(lambda: _result()),
+            default_number=_NUMBER,
+        )
+        app = create_mcp_app(
+            service,
+            host="127.0.0.1",
+            token=_TOKEN,
+            public_url="https://agent.example.com",
+        )
+        body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1.0"},
+            },
+        }
+        headers = {
+            "Authorization": f"Bearer {_TOKEN}",
+            "Accept": "application/json, text/event-stream",
+        }
+
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://agent.example.com",
+            ) as client:
+                allowed = await client.post("/mcp", json=body, headers=headers)
+                assert allowed.status_code == 200
+
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://unexpected.example",
+            ) as client:
+                rejected = await client.post("/mcp", json=body, headers=headers)
+                assert rejected.status_code == 421
+
+    asyncio.run(scenario())

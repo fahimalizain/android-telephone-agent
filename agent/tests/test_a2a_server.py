@@ -21,6 +21,7 @@ pytest.importorskip("a2a")
 pytest.importorskip("starlette")
 
 import httpx  # noqa: E402
+from a2a.helpers import new_data_part, new_text_message  # noqa: E402
 from a2a.server.request_handlers.response_helpers import agent_card_to_dict  # noqa: E402
 from a2a.types import TaskArtifactUpdateEvent, TaskState, TaskStatusUpdateEvent  # noqa: E402
 from a2a.utils.constants import PROTOCOL_VERSION_CURRENT  # noqa: E402
@@ -103,6 +104,7 @@ class _Context:
     task_id: str | None = _A2A_TASK_ID
     context_id: str | None = _A2A_CONTEXT_ID
     current_task: object | None = None
+    message: object | None = None
 
     def get_user_input(self) -> str:
         return self.text
@@ -122,11 +124,13 @@ class _FakeService:
         self.task = task
         self.answer_result = answer_result
         self.submitted: list[str] = []
+        self.numbers: list[str | None] = []
         self.answers: list[tuple[str, str]] = []
         self.canceled: list[str] = []
 
-    async def submit(self, *, objective: str) -> CallTask:
+    async def submit(self, *, objective: str, number: str | None = None) -> CallTask:
         self.submitted.append(objective)
+        self.numbers.append(number)
         return self.task
 
     async def answer(self, task_id: str, text: str) -> bool:
@@ -172,8 +176,8 @@ def test_build_agent_card_describes_the_jsonrpc_skill() -> None:
     assert interface.protocol_version == PROTOCOL_VERSION_CURRENT
     assert card.capabilities.streaming is True
     assert card.capabilities.push_notifications is False
-    assert list(card.default_input_modes) == ["text/plain"]
-    assert list(card.default_output_modes) == ["text/plain"]
+    assert list(card.default_input_modes) == ["text/plain", "application/json"]
+    assert list(card.default_output_modes) == ["text/plain", "application/json"]
 
     assert len(card.skills) == 1
     skill = card.skills[0]
@@ -181,8 +185,8 @@ def test_build_agent_card_describes_the_jsonrpc_skill() -> None:
     assert skill.name == "Place a phone call"
     assert list(skill.tags) == ["telephony", "voice", "outbound-call"]
     assert len(skill.examples) == 2
-    assert list(skill.input_modes) == ["text/plain"]
-    assert list(skill.output_modes) == ["text/plain"]
+    assert list(skill.input_modes) == ["text/plain", "application/json"]
+    assert list(skill.output_modes) == ["text/plain", "application/json"]
 
     document = json.dumps(agent_card_to_dict(card))
     assert _TOKEN not in document
@@ -270,6 +274,32 @@ def test_new_message_submits_a_call_and_asks_for_consultation_input() -> None:
         assert pending.task_id == _A2A_TASK_ID
         assert pending.context_id == _A2A_CONTEXT_ID
         assert not _artifacts(queue)
+
+    asyncio.run(scenario())
+
+
+def test_structured_data_part_carries_objective_and_destination() -> None:
+    async def scenario() -> None:
+        service = _FakeService(
+            events=[_event("state", 1.0, {"state": "completed"})],
+            task=_task(state=CallTaskState.COMPLETED, result=_result()),
+        )
+        message = new_text_message("")
+        message.parts.append(
+            new_data_part(
+                {
+                    "objective": "Call the clinic about the 3 pm slot.",
+                    "number": "+15555550123",
+                }
+            )
+        )
+        queue = _RecordingQueue()
+
+        await _executor(service).execute(_Context("", message=message), queue)
+
+        assert service.submitted == ["Call the clinic about the 3 pm slot."]
+        assert service.numbers == ["+15555550123"]
+        assert _statuses(queue)[-1].status.state == TaskState.TASK_STATE_COMPLETED
 
     asyncio.run(scenario())
 

@@ -604,16 +604,20 @@ def test_audit_log_is_jsonl_and_never_exposes_raw_number(tmp_path: Path) -> None
         records = [json.loads(line) for line in text.splitlines()]
         assert records
         for record in records:
-            assert set(record) == {"at", "kind", "task_id", "data"}
+            assert set(record) == {"ts", "at", "kind", "task_id", "data"}
             assert isinstance(record["at"], (int, float))
+            assert isinstance(record["ts"], str) and "T" in record["ts"]
             assert record["task_id"] == task.id
 
         finished_records = [record for record in records if record["kind"] == "finished"]
         assert len(finished_records) == 1
         assert finished_records[0]["data"]["number"] == mask_number(_NUMBER)
         assert finished_records[0]["data"]["state"] == "completed"
+        assert "transcript" not in finished_records[0]["data"]
+        assert "objective" not in finished_records[0]["data"]
         assert _NUMBER not in text
         assert _NUMBER.removeprefix("+") not in text
+        assert "Audit this call." not in text
 
     asyncio.run(scenario())
 

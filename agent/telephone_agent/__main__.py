@@ -437,7 +437,12 @@ def _server_apps(config: Config, service: CallService) -> list[tuple[object, str
             "`pip install -e '.[server]'` in the agent directory"
         ) from exc
 
-    mcp_app = create_mcp_app(service, host=config.server.host, token=config.server.token)
+    mcp_app = create_mcp_app(
+        service,
+        host=config.server.host,
+        token=config.server.token,
+        public_url=config.server.public_url,
+    )
     a2a_app = create_a2a_app(
         service,
         host=config.server.host,

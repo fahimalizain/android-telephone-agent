@@ -8,8 +8,10 @@ adapter can be added beside it without duplicating queueing or cancellation.
 from __future__ import annotations
 
 import math
+from urllib.parse import urlsplit
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.routing import Route
 
@@ -122,15 +124,25 @@ class McpTools:
         return task
 
 
-def create_mcp_app(service: CallService, *, host: str, token: str) -> Starlette:
+def create_mcp_app(
+    service: CallService,
+    *,
+    host: str,
+    token: str,
+    public_url: str = "",
+) -> Starlette:
     """Build the authenticated MCP Streamable HTTP application.
 
     Args:
         service: The shared call service. The caller owns its lifecycle.
         host: Host passed to the Streamable HTTP transport for DNS-rebinding
-            protection. It does not bind a socket; a future ``serve`` command
-            passes the value to uvicorn.
+            protection. It does not bind a socket; ``serve`` passes the value to
+            uvicorn.
         token: Bearer token required on every route except ``/health``.
+        public_url: Optional externally reachable base URL. When set, its host
+            is added to the DNS-rebinding allowlist so a reverse proxy can
+            forward requests with the public ``Host`` header. Loopback remains
+            allowed for local probes.
 
     Raises:
         ValueError: If *token* is empty or whitespace.
@@ -176,7 +188,48 @@ def create_mcp_app(service: CallService, *, host: str, token: str) -> Starlette:
         description=_LIST_CALLS_DESCRIPTION,
     )
 
-    app = server.streamable_http_app(host=host)
+    app = server.streamable_http_app(
+        host=host,
+        transport_security=_transport_security(public_url),
+    )
     app.router.routes.append(Route("/health", health_endpoint, methods=["GET"], name="health"))
     app.add_middleware(BearerAuthMiddleware, token=token)
     return app
+
+
+def _transport_security(public_url: str) -> TransportSecuritySettings | None:
+    """Return rebinding protection that also accepts a public hostname.
+
+    The MCP SDK enables DNS-rebinding protection automatically only when it is
+    bound to loopback, and then only allows loopback ``Host`` headers. A
+    reverse proxy forwards the public hostname, so include it explicitly.
+    """
+
+    if not public_url:
+        return None
+
+    parsed = urlsplit(public_url)
+    hostname = parsed.hostname
+    if not hostname:
+        return None
+
+    allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*", hostname, f"{hostname}:*"]
+    if parsed.port is not None:
+        allowed_hosts.append(f"{hostname}:{parsed.port}")
+
+    origin = f"{parsed.scheme}://{hostname}"
+    if parsed.port is not None:
+        origin = f"{origin}:{parsed.port}"
+    allowed_origins = [
+        "http://127.0.0.1:*",
+        "http://localhost:*",
+        "http://[::1]:*",
+        origin,
+        f"{parsed.scheme}://{hostname}:*",
+    ]
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
