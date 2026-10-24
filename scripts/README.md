@@ -168,3 +168,68 @@ the same phone and call slot.
   your configuration lives elsewhere.
 - `telephone-agent.service` ships with `User=pi`; change it to your account.
 - `RuntimeWatchdogSec=15` is set in `/etc/systemd/system.conf`, not in a service unit.
+
+## Android helper build and provisioning
+
+The Gradle project lives in `android-helper/`. These host-side scripts build the
+APK, install it over adb, and exercise the LAN endpoint. They do not modify the
+Android sources and never print the bearer token.
+
+| File | Purpose | Usage |
+|---|---|---|
+| `build-helper.sh` | Build and verify the helper APK with the Gradle wrapper. | `./scripts/build-helper.sh [--debug or --release] [--clean]` |
+| `install-helper.sh` | Install the newest APK, grant permissions, whitelist device idle, and start `DialService`. | `./scripts/install-helper.sh [--apk PATH] [--serial SERIAL] [--no-start] [--health URL]` |
+| `helper-smoke-test.sh` | Check `/health` and reject an invalid token; optionally call or hang up. | `./scripts/helper-smoke-test.sh [--url URL] [--token-file PATH] [--call +E164] [--hangup]` |
+
+### Build
+
+```sh
+./scripts/build-helper.sh
+./scripts/build-helper.sh --debug --clean
+./scripts/build-helper.sh --release
+```
+
+By default, the script builds the debug APK and also builds release when
+`android-helper/keystore.properties` exists. `--release` requires that file and
+errors without it. The script uses `JAVA_HOME`, `ANDROID_HOME`, and
+`GRADLE_USER_HOME` when they are set, otherwise
+`/usr/lib/jvm/java-21-openjdk-amd64`, `/data/Android`, and `/scratch/gradle`.
+Each APK's path, size, SHA-256, `apksigner` verification, and `aapt2` badging
+summary are printed.
+
+### Install
+
+```sh
+./scripts/install-helper.sh
+./scripts/install-helper.sh --apk /path/to/app-debug.apk
+./scripts/install-helper.sh --serial R58M123456A --no-start
+./scripts/install-helper.sh --health http://192.168.1.50:8765
+```
+
+Without `--apk`, the newest release or debug APK is installed. The script
+requires exactly one authorized adb device unless `--serial` is given. It then
+grants `CALL_PHONE`, `READ_PHONE_STATE`, `ANSWER_PHONE_CALLS`, and
+`POST_NOTIFICATIONS`, adds `dev.example.dialhelper` to the device-idle
+whitelist, and starts `dev.example.dialhelper/.DialService`. `--no-start` skips
+the service start. The script prints the launcher command and the phone's
+`wlan0` address; permission grants and the whitelist are best effort.
+
+### Smoke test
+
+```sh
+./scripts/helper-smoke-test.sh --url http://192.168.1.50:8765
+./scripts/helper-smoke-test.sh --url http://192.168.1.50:8765 \
+  --token-file /path/to/token
+./scripts/helper-smoke-test.sh --url http://192.168.1.50:8765 \
+  --token-file /path/to/token --call +91XXXXXXXXXX
+./scripts/helper-smoke-test.sh --url http://192.168.1.50:8765 \
+  --token-file /path/to/token --hangup
+```
+
+The URL comes from `--url` or `TELEPHONE_AGENT_DIALER_URL`. The token comes
+from `--token-file`, `TELEPHONE_AGENT_DIALER_TOKEN`, or
+`TELEPHONE_AGENT_DIALER__TOKEN`, in that order; it is never printed. The default
+run is safe: it checks `/health` for `"status":"ok"` and a `"device"` field,
+then posts an invalid token to `/call` and expects HTTP 401. No real call is
+placed unless `--call` is supplied. `--call` and `--hangup` require a token. The
+script uses curl with a timeout and exits non-zero if any check fails.
