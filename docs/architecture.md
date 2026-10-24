@@ -1,6 +1,6 @@
 # Architecture
 
-Status: design complete, pre-implementation (alpha) | Last updated: 2026-10-24
+Status: alpha; control plane implemented, voice path scaffolded | Last updated: 2026-10-24
 
 The [design brief](./design-brief.md) is authoritative. This document expands it and
 does not add hardware requirements. Device-specific behavior is marked "verify on
@@ -154,10 +154,11 @@ the Pi is expected to work but is unverified. The cellular codec still caps fide
 
 The voice path above is real-time. A separate asynchronous control plane lets other
 agents and LLM hosts delegate outbound calls without blocking for the call. Both
-protocol adapters are thin front ends over one `CallService`: a single task queue, one
-active call (one SIM and one audio path), and a shared destination allowlist, budget
-ledger, and audit log. The control plane is designed for v1 and is not implemented in the
-reference runtime yet.
+protocol adapters are thin front ends over one `CallService`: a single FIFO task queue,
+one active call (one SIM and one audio path), in-memory task state, and an optional JSONL
+audit log. The control plane is implemented in the reference runtime. It is alpha: it
+does not yet enforce a destination allowlist, budgets, per-requester identity, or rate
+limits.
 
 ```mermaid
 flowchart LR
@@ -166,15 +167,15 @@ flowchart LR
     AGT["Requester agent<br/>A2A client"]
   end
   subgraph RT["Agent runtime on the Pi"]
-    MCP["MCP server<br/>Streamable HTTP"]
-    A2A["A2A server<br/>JSON-RPC over HTTP"]
-    SVC["CallService<br/>queue, allowlist, budgets, audit"]
+    MCP["MCP server<br/>Streamable HTTP<br/>:8765/mcp"]
+    A2A["A2A server<br/>JSON-RPC over HTTP<br/>:8766/a2a"]
+    SVC["CallService<br/>FIFO queue, one active call<br/>in-memory tasks, optional audit"]
     SES["CallSession<br/>voice pipeline"]
   end
   PA["Phone A<br/>SIM A and dial helper"]
   PSTN["PSTN"]
   LLM <-->|"tool calls"| MCP
-  AGT <-->|"message/send, tasks/*"| A2A
+  AGT <-->|"JSON-RPC"| A2A
   MCP --> SVC
   A2A --> SVC
   SVC -->|"one active call"| SES
@@ -182,19 +183,30 @@ flowchart LR
   PA <-->|"cellular voice"| PSTN
 ```
 
-MCP over Streamable HTTP exposes `place_call`, `get_call`, `answer_call`,
-`cancel_call`, and `list_calls`; `place_call` returns a task id immediately and never
-blocks for the call. A2A serves an Agent Card at `/.well-known/agent-card.json` and
-implements `message/send`, `message/stream`, `tasks/get`, and `tasks/cancel`. An A2A task
-maps to the call: `submitted` while queued, `working` while dialing or in conversation,
-`input-required` during a mid-call consultation, then `completed`, `canceled`, or
-`failed`. The final artifact is a structured summary and transcript; raw audio is never
-exposed.
+One process runs one `CallService` and two listeners. MCP over Streamable HTTP is at
+`/mcp`; A2A JSON-RPC is at `/a2a`. The A2A Agent Card is at
+`/.well-known/agent-card.json`, and both listeners expose `GET /health`. MCP exposes
+`place_call`, `get_call`, `answer_call`, `cancel_call`, and `list_calls`; `place_call`
+returns a task id immediately and never blocks for the call. A2A uses the `a2a-sdk`
+protocol 1.0 methods `SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`,
+and `SubscribeToTask` (the 0.3 aliases such as `message/send` are not enabled).
 
-Both listeners require a bearer token and bind to loopback by default, or to the LAN
-only when explicitly configured. Destinations must pass an allowlist, and each requester
-has a call budget. A remote objective is untrusted input and cannot change system
-policy. Tasks are in memory and do not survive a restart. See
+A2A maps one task to one call. The A2A task moves through `TASK_STATE_SUBMITTED` to
+`TASK_STATE_WORKING` as the call is queued, dialing, or in conversation; it becomes
+`TASK_STATE_INPUT_REQUIRED` during a mid-call consultation and finally
+`TASK_STATE_COMPLETED`, `TASK_STATE_CANCELED`, or `TASK_STATE_FAILED`. A completed call
+publishes one `call-summary` artifact with a JSON summary and transcript; raw audio is
+never exposed.
+
+Both listeners use one shared bearer token. `/health` and the A2A Agent Card are public;
+the MCP and A2A RPC endpoints require the token. The listeners bind to loopback by
+default; a non-loopback bind also requires `[server].public_url`. The token is
+admin-level: there is no requester identity or per-token scoping, so any holder can
+read, answer, or cancel any task. A remote objective is untrusted input, but no technical
+policy boundary stops the model from acting on it yet. Tasks are in memory and do not
+survive a restart. Without bundled STT/TTS adapters, delegated calls use placeholder
+transcripts and log replies instead of speaking; the control plane is usable for call
+control, not a natural voice conversation out of the box. See
 [Interoperability](./interop.md) and
 [ADR 0007](./decisions/0007-expose-agent-over-mcp-and-a2a.md).
 

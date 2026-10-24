@@ -7,7 +7,8 @@ Android phone and a Raspberry Pi.
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 ![Platform: Raspberry Pi + Android](https://img.shields.io/badge/platform-Raspberry%20Pi%20%2B%20Android-lightgrey.svg)
 
-> Status: alpha, design stage. This is not a finished product.
+> Status: alpha. Reference implementation and design documentation; not a finished
+> product.
 
 ## What this is
 
@@ -28,7 +29,10 @@ unavailable or inconvenient; USB remains the default and canonical path. See the
 [ADR 0006](docs/decisions/0006-use-bluetooth-hfp-audio.md).
 
 Other agents can delegate calls to the runtime over MCP and A2A; one process serves both
-endpoints from a single call queue. See the [interoperability guide](docs/interop.md).
+endpoints from a single call queue. MCP is usable today; A2A task execution is alpha.
+The control plane uses one shared admin-level bearer token and does not yet enforce a
+destination allowlist, per-requester budgets, or requester identity, so keep it on a
+trusted network. See the [interoperability guide](docs/interop.md).
 
 ## What this is not
 
@@ -148,6 +152,7 @@ docs/
   android-setup.md
   dial-helper.md
   voice-agent.md
+  interop.md
   latency-budget.md
   prompts.md
   operations.md
@@ -155,7 +160,7 @@ docs/
   troubleshooting.md
   faq.md
   glossary.md
-  decisions/0001-...md .. 0006-...md
+  decisions/0001-...md .. 0007-...md
 scripts/
   README.md
   uac-gadget.sh
@@ -217,7 +222,7 @@ token, and must not be port-forwarded. See [SECURITY.md](SECURITY.md).
 
 ## Status and limitations
 
-- Alpha, design stage. The runtime is a reference scaffold; there is no stable release.
+- Alpha. The voice runtime is a reference scaffold; there is no stable release.
 - UAC1 behavior must be verified on each phone and Android build. Android compatibility
   is likely but not guaranteed, and vendor audio routing can differ.
 - The Android helper app is a reference, not a supported product. Ending a call through

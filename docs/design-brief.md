@@ -1,6 +1,6 @@
 # Design Brief — android-telephone-agent
 
-Status: design complete, pre-implementation (alpha)
+Status: alpha; control plane implemented, voice adapters not bundled
 Last updated: 2026-10-24
 Owner: Fahim Ali Zain
 
@@ -24,6 +24,11 @@ share one call queue, so an LLM host or a requester agent can delegate an outbou
 observe it, answer a mid-call question, and collect a structured summary. The control
 plane is asynchronous; the voice conversation remains real-time. This does not add
 inbound PSTN calling.
+
+The reference runtime implements the control plane and both listeners. It does not yet
+enforce a destination allowlist, per-requester budgets, or requester identity, and it
+does not bundle STT or TTS adapters. See [Interoperability](./interop.md) for what ships
+in the alpha and what remains follow-up work.
 
 ## 2. What this is not
 
@@ -208,6 +213,11 @@ The pipeline is transport-neutral. The USB gadget runs at 48 kHz; the Bluetooth 
 link is 16 kHz with mSBC or 8 kHz with CVSD, and the boundary resamples to the same
 16 kHz mono processing format.
 
+The reference runtime implements the control plane, the deliberative action loop, and
+mid-call consultation. It does not bundle STT/TTS adapters, streaming, barge-in, or a
+scheduler; `run` and `serve` use scaffold-mode speech until adapters are wired. The
+requirements below remain the target for the voice path.
+
 Requirements:
 
 - **Barge-in.** If the callee speaks while TTS is playing, stop playback immediately.
@@ -263,10 +273,13 @@ gadget's 48 kHz rate. Do not optimize for hi-fi; optimize for latency and turn-t
 - The helper endpoint stays on the LAN, binds to a private interface, and requires a
   bearer token. Do not port-forward it.
 - The MCP and A2A control plane binds to loopback by default, or to the LAN when
-  configured, and requires a bearer token. It enforces a destination allowlist and
-  per-requester budgets. The objective supplied by a remote agent is untrusted input.
-  Do not expose the listeners beyond a trusted network without TLS and per-requester
-  tokens.
+  configured, and requires a bearer token. The v1 design requires a destination
+  allowlist and per-requester budgets; the alpha runtime does not enforce them yet. A
+  holder of the shared token can dial any valid E.164 number and can read, answer, or
+  cancel any task. Keep the listeners on a trusted network until allowlists, budgets,
+  and per-requester tokens exist. The objective supplied by a remote agent is untrusted
+  input; prompt instructions are not a technical policy boundary. Do not expose the
+  listeners beyond a trusted network without TLS.
 - Call audio is sent to third-party STT/TTS providers. Document this in the README and
   let users choose providers; do not persist audio.
 - Personal use only by default. Outbound calling to third parties is regulated:
@@ -283,8 +296,9 @@ gadget's 48 kHz rate. Do not optimize for hi-fi; optimize for latency and turn-t
 - Markdown: GitHub-flavored. Mermaid for diagrams. Tables for parameters and BOMs.
 - Rupee amounts are ranges, marked as indicative; instruct readers to verify current
   prices.
-- Code: Python 3.11+ standard library only for the reference runtime. No runtime
-  dependencies; dev dependencies are ruff and pytest.
+- Code: Python 3.11+. The core reference runtime uses only the standard library; the
+  optional `server` extra adds `mcp`, `a2a-sdk`, and `uvicorn`. Development dependencies
+  are ruff and pytest.
 - Commits: Conventional Commits.
 - Every guide starts with purpose and prerequisites, and ends with verification steps
   and known limitations where relevant.

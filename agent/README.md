@@ -142,7 +142,7 @@ actionable message.
 
 | Section | Key | Default | Description |
 |---|---|---|---|
-| top level | `phone_number` | empty | Destination in E.164 form. Optional for `doctor` and `selftest`; required for `dial`/`run` unless `--number` is passed. |
+| top level | `phone_number` | empty | Destination in E.164 form. Optional for `doctor` and `selftest`; required for `dial`/`run` unless `--number` is passed. Also the default destination for MCP `place_call` and A2A `SendMessage` when no number is supplied. |
 | `audio` | `backend` | `alsa` | `alsa` selects the USB Audio Class gadget; `pipewire` selects Bluetooth HFP through PipeWire. |
 | `audio` | `card` | required for `alsa` | ALSA card id from `arecord -l`, the token after `card N:` rather than the bracketed description. Ignored when `backend = "pipewire"`. |
 | `audio` | `device` | `0` | ALSA device index. Used only when `backend = "alsa"`. |
@@ -162,6 +162,7 @@ actionable message.
 | `brain` | `system_prompt` | built-in prompt | Used by `HttpBrain`; an empty value falls back to the built-in prompt. |
 | `brain` | `max_tokens` | `200` | Maximum reply length requested from the provider. |
 | `brain` | `timeout_s` | `30.0` | Per-request timeout. |
+| `brain` | `action_mode` | `text` | `text` wraps the normal reply brain and never consults. `json` requires `kind = "http"` and asks the model for one JSON action per turn. |
 | `agent` | `schedule` | empty | Reserved for an external scheduler. The runtime does not read it in v0. |
 | `agent` | `max_call_seconds` | `300` | Hard call duration limit, counted from the start of dialing. |
 | `agent` | `silence_timeout_s` | `20.0` | Hang up after this much silence with no active utterance. Ringing time counts. |
@@ -169,6 +170,12 @@ actionable message.
 | `agent` | `language` | `en` | BCP-47 tag reserved for speech adapters. |
 | `agent` | `consult_timeout_s` | `8.0` | How long a mid-call consultation may pause the call for the requester's answer. |
 | `agent` | `holding_phrase` | `One moment please.` | Spoken before the call pauses for the requester's answer. |
+| `server` | `host` | `127.0.0.1` | Bind address for both listeners. A non-loopback value also requires `public_url`. |
+| `server` | `port` | `8765` | MCP Streamable HTTP port. |
+| `server` | `a2a_port` | `8766` | A2A JSON-RPC port. Must differ from `port`. |
+| `server` | `token` | empty | Shared bearer token for the MCP and A2A RPC endpoints. Required by `serve`; at least 8 characters when set. Prefer the environment override. |
+| `server` | `public_url` | empty | Externally reachable base URL used in the A2A Agent Card and in the MCP transport's allowed hosts. Required when `host` is not loopback. |
+| `server` | `audit_log` | empty | Optional append-only JSONL path for `CallService` task events. |
 
 For Bluetooth HFP, the audio section looks like this:
 
@@ -297,9 +304,32 @@ request waits in the queue. Task state is held in memory and is lost on
 restart. `server.host` defaults to `127.0.0.1`, which only accepts connections
 from the same host. If you bind a LAN address, also set `server.public_url` so
 the A2A Agent Card advertises a URL that a requester can reach; the command
-refuses to start otherwise. Keep the listener on a trusted network and see
-[docs/interop.md](../docs/interop.md) for the protocol contract and security
-model. The optional `[server].audit_log` appends task events as JSONL.
+refuses to start otherwise.
+
+The token is admin-level. There is no destination allowlist, per-requester
+budget, rate limit, or queue-depth limit, and no requester identity: any token
+holder can place a call to any valid E.164 number and can list, read, answer, or
+cancel every task. Keep the listener on loopback or a trusted network until
+those controls exist, and do not port-forward it. See
+[docs/interop.md](../docs/interop.md) for the protocol contract, security
+model, and current A2A alpha caveat.
+
+Without STT/TTS adapters, a delegated call uses placeholder transcripts and logs
+replies instead of speaking. The control plane still places, tracks, and cancels
+the call; it is not a natural voice conversation out of the box.
+
+MCP clients call the five tools `place_call`, `get_call`, `answer_call`,
+`cancel_call`, and `list_calls`. A2A clients speak protocol 1.0, send
+`A2A-Version: 1.0`, and use `SendMessage`/`GetTask`/`CancelTask`. A new call can
+carry a text part with the objective, or a data part such as
+`{"objective": "...", "number": "+15555550100"}`; `to` is accepted as an alias
+for `number`.
+
+The optional `[server].audit_log` appends one JSON object per task event with
+`ts` (UTC ISO-8601), `at` (monotonic), `kind`, `task_id`, and `data`. The final
+`finished` record drops the objective and full transcript, and the destination
+is masked, but per-turn `transcript` and `reply` events do contain text. Apply a
+retention rule and restrict access.
 
 ## Plugging in STT, TTS, and an LLM
 
@@ -315,8 +345,9 @@ PCM is signed 16-bit little-endian, mono, at `audio.sample_rate` (16 kHz by
 default). The transcriber receives one endpointed utterance; the synthesizer
 returns the complete reply audio. Neither adapter may write audio to disk.
 
-Wire implementations in `telephone_agent/__main__.py::_build_session`, or call
-the library directly:
+Wire implementations in `telephone_agent/__main__.py::_build_session` for the
+one-shot `run` command and in `_build_session_factory` for `serve`, or call the
+library directly:
 
 ```python
 from telephone_agent.pipeline import CallSession
@@ -365,10 +396,11 @@ speaking when the caller interrupts.
 
 ## systemd
 
-The runtime places one call and exits, so use a systemd timer rather than
-`Restart=always`. Restarting a command that dials would redial after every exit.
-The timer is the scheduler in v0; `agent.schedule` in the TOML file is reserved
-for a future scheduler and is not read.
+The one-shot `run` command places one call and exits, so use a systemd timer rather
+than `Restart=always`. Restarting a command that dials would redial after every exit.
+The timer is the scheduler in v0; `agent.schedule` in the TOML file is reserved for a
+future scheduler and is not read. The `serve` command is the long-lived alternative and
+should run as a normal service if you use the control plane instead of the timer.
 
 Place the units in `/etc/systemd/system/` and adjust `User`, paths, and the
 schedule for your installation. `User=pi` is the common Raspberry Pi OS account;
@@ -477,8 +509,17 @@ workflow runs `ruff check` and `pytest` on Python 3.11, 3.12, and 3.13. Python
 
 ## Limitations
 
-- **No STT or TTS adapters are bundled.** `run` uses placeholder transcripts and
-  logs replies unless adapters are injected.
+- **No STT or TTS adapters are bundled.** `run` and `serve` use placeholder
+  transcripts and log replies unless adapters are injected.
+- **No control-plane access controls.** `serve` has one shared admin token and
+  no destination allowlist, per-requester budget, requester identity, rate
+  limit, or queue-depth limit. Keep it on a trusted network.
+- **A2A task execution is alpha.** With `a2a-sdk` 1.2.3 the first `SendMessage`
+  or `SendStreamingMessage` can return `-32006` before a task is created; see
+  [docs/interop.md](../docs/interop.md). MCP is unaffected.
+- **A2A consultation timeouts are stale.** If a consultation times out while
+  the A2A task is `TASK_STATE_INPUT_REQUIRED`, the task stays in that state until
+  the requester sends another message.
 - **No barge-in.** Playback blocks capture. The caller cannot interrupt the
   agent, and the agent may talk over the caller if VAD finds an utterance during
   playback.
@@ -578,9 +619,11 @@ agent/
     audio.py              arecord/aplay and pw-record/pw-play backends, SCO discovery
     vad.py                RMS, dBFS, energy endpointer
     dialer.py             helper HTTP client with retries and idempotency
-    brain.py              Brain protocol, EchoBrain, HttpBrain
-    pipeline.py           CallSession state machine and adapter seams
-    service.py            long-lived task queue shared by the protocol adapters
+    actions.py            Speak/Consult/HangUp actions and BrainActionAdapter
+    brain.py              Brain protocol, EchoBrain, HttpBrain, HttpDeliberativeBrain
+    consult.py            consultation broker for mid-call questions
+    pipeline.py           CallSession state machine, consultation, adapter seams
+    service.py            task queue, task state, and audit log
     servers/              MCP and A2A adapters (optional server extra)
   tests/                  stdlib-only tests; no hardware or network required
 ```

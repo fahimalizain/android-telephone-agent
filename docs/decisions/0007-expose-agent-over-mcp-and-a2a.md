@@ -1,13 +1,13 @@
 # ADR 0007: Expose the agent over MCP and A2A
 
-- Status: Accepted for v1; design stage, not yet implemented
+- Status: Accepted; implemented (alpha)
 - Date: 2026-10-24
 - Deciders: Project owner
 
 ## Context
 
-The reference runtime places one outbound call from a command-line invocation and then
-exits. That fits a scheduled personal call, but it does not let another agent or an LLM
+The reference runtime can place one outbound call from a command-line invocation and then
+exit. That fits a scheduled personal call, but it does not let another agent or an LLM
 host delegate a call, watch its progress, answer a question that arises during the call,
 or cancel it. Exposing the call agent as a service turns the one-shot pipeline into a
 long-lived runtime with a control surface.
@@ -34,36 +34,42 @@ queue and one concurrency limit.
 ## Decision
 
 The runtime gains a long-lived `CallService` and two protocol adapters. The service owns
-the task queue, the call lifecycle, the destination allowlist, per-requester budgets,
-consultation waits, and the audit log. It admits at most one active call. The adapters
-are thin translations between protocol objects and service operations; they do not own
-call state.
+the FIFO task queue, the call lifecycle, consultation waits, in-memory task state, and
+the optional JSONL audit log. It admits at most one active call. The adapters are thin
+translations between protocol objects and service operations; they do not own call
+state.
 
 **MCP.** An MCP server over Streamable HTTP exposes `place_call`, `get_call`,
-`answer_call`, `cancel_call`, and `list_calls`. `place_call` validates the destination
-and budget, enqueues a task, and returns a task id immediately. It never blocks for the
-duration of the call. Status is read with `get_call`. This is the path for an LLM host
-that treats the telephone as a tool.
+`answer_call`, `cancel_call`, and `list_calls`. `place_call` validates the objective,
+destination format, and optional duration, enqueues a task, and returns a task id
+immediately. It never blocks for the duration of the call. Status is read with
+`get_call`. This is the path for an LLM host that treats the telephone as a tool.
 
-**A2A.** An A2A server publishes an Agent Card at `/.well-known/agent-card.json` and
-implements JSON-RPC `message/send`, `message/stream`, `tasks/get`, and `tasks/cancel`.
-A delegated call is an A2A task: `submitted` while queued, `working` while dialing,
-ringing, or in conversation, `input-required` while the agent waits for a missing fact,
-then `working` again, and finally `completed`, `canceled`, or `failed`. The final
-artifact is a structured summary plus the transcript. Raw audio is never an artifact.
+**A2A.** An A2A server publishes a public Agent Card at `/.well-known/agent-card.json`
+and serves the protocol 1.0 JSON-RPC methods `SendMessage`, `SendStreamingMessage`,
+`GetTask`, `CancelTask`, and `SubscribeToTask`. A delegated call is an A2A task that
+moves through `TASK_STATE_SUBMITTED` to `TASK_STATE_WORKING` as it is queued, dialing,
+or in conversation; it becomes `TASK_STATE_INPUT_REQUIRED` while the agent waits for a
+missing fact; and finally `TASK_STATE_COMPLETED`, `TASK_STATE_CANCELED`, or
+`TASK_STATE_FAILED`. The final artifact is a structured summary plus the transcript.
+Raw audio is never an artifact.
 
 **Mid-call consultation.** The deliberative brain can emit `Consult(question)` when a
-required fact is missing. The pipeline speaks a short holding phrase, moves the task to
-`input-required`, and waits up to a bounded timeout for an answer through either
-protocol. On a valid answer it resumes the conversation with that fact. On timeout or an
-unusable answer it applies a local fallback policy and continues or closes the call. The
-callee is never left in unbounded silence.
+required fact is missing. The pipeline speaks (or logs, without a TTS adapter) a short
+holding phrase, moves the task to `input_required`, and waits up to a bounded timeout for
+an answer through either protocol. On a valid answer it resumes the conversation with
+that fact. On timeout it speaks or logs a local fallback line and continues the call;
+the callee is never left in unbounded silence. There is no question id. If an A2A consultation times out, the A2A
+task stays `TASK_STATE_INPUT_REQUIRED` until the requester sends another message; there
+is no server-initiated timeout update.
 
-**Transport and trust.** Both listeners require a bearer token and bind to loopback by
-default, or to the LAN only when explicitly configured; neither is port-forwarded.
-Destinations must match an allowlist, and each requester has call and concurrency
-budgets. The objective supplied by a remote agent is untrusted input: it defines the goal
-of the call but cannot change system policy, the allowlist, budgets, or the tool set.
+**Transport and trust.** Both listeners use one shared bearer token and bind to loopback
+by default, or to the LAN only when explicitly configured and `[server].public_url` is
+set. `/health` and the A2A Agent Card are public; the MCP and A2A RPC endpoints require
+the token. The token is admin-level: there is no requester identity, per-token scoping,
+destination allowlist, budget, or rate limit in v1. The objective supplied by a remote
+agent is untrusted input: it defines the goal of the call, but no technical policy
+boundary yet stops the model from acting on instructions inside it.
 
 **v1 limits.** Tasks live in memory and are appended to a JSONL audit log; they do not
 survive a restart. One call runs at a time. No raw audio is exposed over either
@@ -73,8 +79,8 @@ protocol. Calls remain outbound PSTN calls; only the control surface is new.
 
 ### Positive
 
-- One queue and one policy boundary serve both protocols, so budgets, allowlists, and
-  audit behavior cannot diverge between MCP and A2A.
+- One queue and one task model serve both protocols, so queueing, cancellation,
+  consultation, and audit behavior cannot diverge between MCP and A2A.
 - LLM hosts can delegate a call with standard MCP tooling and no custom client.
 - Requester agents get a standard task lifecycle, progress updates, and mid-task input
   instead of a bespoke polling API.
@@ -84,8 +90,9 @@ protocol. Calls remain outbound PSTN calls; only the control surface is new.
   keep their existing responsibilities.
 - The artifact is structured text, so a requester can act on the outcome without audio
   storage or a transcription step.
-- One task model is visible through both protocols, which simplifies reasoning about
-  state, cancellation, and consultation.
+- Both adapters share one service, so an A2A-created call is visible through MCP and
+  the same cancellation and consultation rules apply. A2A task ids remain separate
+  from CallService task ids; an MCP-created call has no A2A task.
 
 ### Negative
 
@@ -97,14 +104,17 @@ protocol. Calls remain outbound PSTN calls; only the control surface is new.
   a call it is waiting on.
 - One concurrent call means head-of-line blocking: a long call delays every queued task,
   regardless of protocol.
-- An `input-required` wait holds a live PSTN line and consumes call minutes without
+- An `input_required` wait holds a live PSTN line and consumes call minutes without
   progress. The holding phrase is audible and slightly unnatural.
-- A single shared token is coarse. Per-requester budgets depend on mapping each token to
-  a requester identity; a shared token collapses every caller into one budget.
+- A single shared token is coarse and admin-level. Every holder can read, answer, and
+  cancel every task. There is no requester identity to scope access or budgets to.
 - Transcripts in the artifact are personal data. They need authenticated delivery and a
   retention rule, and they widen the privacy surface compared with a summary alone.
 - A remote objective and remote consultation answers are prompt-injection vectors. The
-  design must keep policy outside the model's control.
+  runtime has no technical policy boundary outside the model yet; only the prompt asks
+  the model to ignore conflicting instructions.
+- The audit log is not transcript-free. Per-turn `transcript` and `reply` events carry
+  text; only the final `finished` record drops the objective and full transcript.
 
 ### Neutral
 
@@ -115,8 +125,29 @@ protocol. Calls remain outbound PSTN calls; only the control surface is new.
 - v1 has no push notifications. Clients poll or hold a stream open.
 - The runtime now listens on a network socket, so firewall, TLS termination, and token
   rotation become operator concerns.
-- MCP and A2A can be enabled independently, but they share the same service and limits,
-  so enabling both does not add call capacity.
+- The `serve` command starts both listeners; there is no per-protocol enable switch.
+  They share the same service and single call slot, so enabling both does not add call
+  capacity.
+
+### Follow-up work (not implemented in v1)
+
+- **Destination allowlist.** Validate the destination against an operator-managed E.164
+  list or prefix set before a task is queued. This is a requirement, not a shipped
+  control.
+- **Requester identity and token scoping.** Map each token to a requester, own the task
+  list by that identity, and allow one requester to see only its own tasks.
+- **Budgets and rate limits.** Bound calls per requester per hour and per day, maximum
+  duration, queue depth, and request rate. Refuse work over budget instead of queueing
+  it without limit.
+- **Durable task state.** A task store that survives a restart, so a requester does not
+  lose a call it is waiting on.
+- **A2A timeout updates.** A server-initiated update when a consultation times out, so
+  the A2A task does not stay `TASK_STATE_INPUT_REQUIRED` until the next requester
+  message.
+- **Speech adapters.** Bundle or document STT and TTS adapters so delegated calls are a
+  natural voice conversation rather than placeholder transcripts and logged replies.
+- **Push notifications and TLS.** Both remain operator or deployment concerns. The
+  runtime serves plain HTTP and relies on a reverse proxy or VPN for transport security.
 
 ## Alternatives considered
 
