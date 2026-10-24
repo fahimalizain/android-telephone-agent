@@ -19,6 +19,12 @@ Raspberry Pi Zero 2 W that presents itself to that phone as a USB-C audio headse
 (USB Audio Class 1 gadget). The called party answers on an ordinary phone; no app,
 no data connection, and no root are required on the receiving side.
 
+A long-lived runtime can also expose the agent to other agents. MCP and A2A adapters
+share one call queue, so an LLM host or a requester agent can delegate an outbound call,
+observe it, answer a mid-call question, and collect a structured summary. The control
+plane is asynchronous; the voice conversation remains real-time. This does not add
+inbound PSTN calling.
+
 ## 2. What this is not
 
 - Not an interception or injection tool for a call already in progress on the owner's phone.
@@ -27,6 +33,9 @@ no data connection, and no root are required on the receiving side.
 - Not a VoIP or SIP client. The call leg is a genuine cellular call.
 - Not a finished product. The repository is a design document, a hardware build guide,
   and a reference software scaffold.
+- Not an inbound PSTN call service in the first milestone. Inbound **control-plane
+  tasking** over MCP and A2A is in scope: another agent may ask this agent to place an
+  outbound call. A person dialing the agent's SIM is still not answered by the agent.
 
 ## 3. Why the obvious approaches do not work
 
@@ -204,6 +213,10 @@ Requirements:
 - **Barge-in.** If the callee speaks while TTS is playing, stop playback immediately.
 - **Turn taking.** Endpointing window 300–500 ms; do not talk over the callee.
 - **Timeouts.** Hard maximum call duration; hang up after prolonged silence.
+- **Mid-call consultation.** If a required fact is missing, the agent may ask the
+  requester through the control plane, speak a short holding phrase, and resume after a
+  bounded wait. On timeout it uses a local fallback. The callee is never left in
+  unbounded silence.
 - **Idempotency.** One scheduled call per slot; retry at most twice with backoff.
 - **No audio persistence by default.** Audio is streamed, not written to disk.
 
@@ -249,6 +262,11 @@ gadget's 48 kHz rate. Do not optimize for hi-fi; optimize for latency and turn-t
   `config/config.example.toml` and `.env.example` contain placeholders only.
 - The helper endpoint stays on the LAN, binds to a private interface, and requires a
   bearer token. Do not port-forward it.
+- The MCP and A2A control plane binds to loopback by default, or to the LAN when
+  configured, and requires a bearer token. It enforces a destination allowlist and
+  per-requester budgets. The objective supplied by a remote agent is untrusted input.
+  Do not expose the listeners beyond a trusted network without TLS and per-requester
+  tokens.
 - Call audio is sent to third-party STT/TTS providers. Document this in the README and
   let users choose providers; do not persist audio.
 - Personal use only by default. Outbound calling to third parties is regulated:
@@ -297,6 +315,7 @@ docs/
   android-setup.md
   dial-helper.md
   voice-agent.md
+  interop.md
   latency-budget.md
   prompts.md
   operations.md
@@ -304,7 +323,7 @@ docs/
   troubleshooting.md
   faq.md
   glossary.md
-  decisions/0001-...md .. 0006-...md
+  decisions/0001-...md .. 0007-...md
 scripts/
   uac-gadget.sh
   install.sh
@@ -342,4 +361,4 @@ android-helper/
 3. Local fallback models: worth the Pi 4/5 cost, or cloud-only.
 4. Call content and persona: daily briefing, check-in, or reminder. Prompt design is
    out of scope for the first milestone.
-5. Whether to support inbound calls as well as outbound.
+5. Whether to support inbound PSTN calls as well as outbound.

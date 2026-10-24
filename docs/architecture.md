@@ -24,6 +24,7 @@ In scope:
   supported Bluetooth HFP alternative.
 - Scheduling, dialing, call-progress tracking, and hangup.
 - Capture, VAD, STT, LLM, TTS, and playback.
+- Delegated outbound calls from other agents over MCP and A2A, as a control plane only.
 - Power, cooling, network, failure handling, and observability.
 
 Non-goals:
@@ -31,7 +32,8 @@ Non-goals:
 - Intercepting or recording a call already in progress on the owner's phone.
 - Root, bootloader unlocking, custom firmware, or vendor HAL changes.
 - VoIP or SIP; the call leg is cellular.
-- Inbound calls in the first milestone.
+- Inbound PSTN calls in the first milestone. Inbound control-plane tasking over MCP and
+  A2A is in scope.
 - More than one concurrent call per phone and Pi pair.
 - Local speech models on the Zero 2 W (stretch goal on a Pi 4 or Pi 5).
 - A consumer product, enclosure design, or support contract.
@@ -147,6 +149,54 @@ This variant was validated on a Linux laptop with a Samsung Galaxy A23: mSBC at 
 bidirectional audio during a Google Meet call, and both SCO directions confirmed with
 `pw-record` and `pw-play`. A PSTN call over Bluetooth and the Pi Zero 2 W were not tested;
 the Pi is expected to work but is unverified. The cellular codec still caps fidelity.
+
+## Control plane: MCP and A2A
+
+The voice path above is real-time. A separate asynchronous control plane lets other
+agents and LLM hosts delegate outbound calls without blocking for the call. Both
+protocol adapters are thin front ends over one `CallService`: a single task queue, one
+active call (one SIM and one audio path), and a shared destination allowlist, budget
+ledger, and audit log. The control plane is designed for v1 and is not implemented in the
+reference runtime yet.
+
+```mermaid
+flowchart LR
+  subgraph REQ["Requesters"]
+    LLM["LLM host<br/>MCP client"]
+    AGT["Requester agent<br/>A2A client"]
+  end
+  subgraph RT["Agent runtime on the Pi"]
+    MCP["MCP server<br/>Streamable HTTP"]
+    A2A["A2A server<br/>JSON-RPC over HTTP"]
+    SVC["CallService<br/>queue, allowlist, budgets, audit"]
+    SES["CallSession<br/>voice pipeline"]
+  end
+  PA["Phone A<br/>SIM A and dial helper"]
+  PSTN["PSTN"]
+  LLM <-->|"tool calls"| MCP
+  AGT <-->|"message/send, tasks/*"| A2A
+  MCP --> SVC
+  A2A --> SVC
+  SVC -->|"one active call"| SES
+  SES <-->|"LAN HTTP: dial and hangup"| PA
+  PA <-->|"cellular voice"| PSTN
+```
+
+MCP over Streamable HTTP exposes `place_call`, `get_call`, `answer_call`,
+`cancel_call`, and `list_calls`; `place_call` returns a task id immediately and never
+blocks for the call. A2A serves an Agent Card at `/.well-known/agent-card.json` and
+implements `message/send`, `message/stream`, `tasks/get`, and `tasks/cancel`. An A2A task
+maps to the call: `submitted` while queued, `working` while dialing or in conversation,
+`input-required` during a mid-call consultation, then `completed`, `canceled`, or
+`failed`. The final artifact is a structured summary and transcript; raw audio is never
+exposed.
+
+Both listeners require a bearer token and bind to loopback by default, or to the LAN
+only when explicitly configured. Destinations must pass an allowlist, and each requester
+has a call budget. A remote objective is untrusted input and cannot change system
+policy. Tasks are in memory and do not survive a restart. See
+[Interoperability](./interop.md) and
+[ADR 0007](./decisions/0007-expose-agent-over-mcp-and-a2a.md).
 
 ## 5. Component view
 
@@ -421,6 +471,6 @@ Carried from the [design brief](./design-brief.md); not resolved here.
 [power and thermal](./power-and-thermal.md), [Raspberry Pi setup](./raspberry-pi-setup.md),
 [Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md),
 [dial helper](./dial-helper.md), [voice agent](./voice-agent.md),
-[latency budget](./latency-budget.md), [operations](./operations.md),
-[runbook](./runbook.md), [glossary](./glossary.md), and the
+[interoperability](./interop.md), [latency budget](./latency-budget.md),
+[operations](./operations.md), [runbook](./runbook.md), [glossary](./glossary.md), and the
 [ADRs](./decisions/0001-use-usb-audio-gadget-instead-of-root.md).

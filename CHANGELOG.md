@@ -22,6 +22,19 @@ The project is at alpha, design stage; minor versions may change APIs and file l
   system unit remains for the USB gadget path.
 - Tests for SCO node discovery, Bluetooth configuration validation, and CLI
   backend wiring.
+- Design for a long-lived control plane that exposes the call agent to other agents
+  through a shared `CallService` with a single-call task queue, destination allowlist,
+  and per-requester budgets.
+- MCP server design using Streamable HTTP with `place_call`, `get_call`,
+  `answer_call`, `cancel_call`, and `list_calls`; `place_call` returns a task id
+  immediately.
+- A2A server design with an Agent Card, `message/send`, `message/stream`, `tasks/get`,
+  and `tasks/cancel`, including the task lifecycle mapping and `input-required` state.
+- Mid-call consultation design: the agent can ask the requester for a missing fact,
+  hold the line with a short phrase, resume with the answer, or fall back after a
+  bounded timeout.
+- Interoperability guide and ADR 0007 covering the MCP and A2A control plane, its
+  security model, failure behaviour, and v1 limitations.
 
 ## [0.1.0] - 2026-10-24
 

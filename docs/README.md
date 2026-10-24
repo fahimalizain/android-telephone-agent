@@ -18,6 +18,8 @@ USB or Android specification enforces them.
   [Bluetooth HFP](bluetooth-hfp.md) after the Android setup.
 - Running the agent: [voice agent](voice-agent.md), [operations](operations.md),
   [runbook](runbook.md), then [troubleshooting](troubleshooting.md).
+- Integrating another agent or LLM host: [interoperability](interop.md), then
+  [ADR 0007](decisions/0007-expose-agent-over-mcp-and-a2a.md).
 - Reference: [latency budget](latency-budget.md), [prompts](prompts.md), [FAQ](faq.md),
   [glossary](glossary.md), and the [decision records](decisions/).
 
@@ -35,6 +37,7 @@ USB or Android specification enforces them.
 | [Android setup](android-setup.md) | Phone A configuration for unattended calls, SIM selection, and USB audio routing. |
 | [Dial helper](dial-helper.md) | Reference helper app, its LAN API, bearer-token authentication, and call-control limits. |
 | [Voice agent](voice-agent.md) | Capture, voice activity detection, STT, LLM, TTS, playback, barge-in, and timeouts. |
+| [Interoperability](interop.md) | MCP tools and A2A tasks for delegating outbound calls, mid-call consultation, security, and limits. |
 | [Latency budget](latency-budget.md) | Per-stage latency targets, measurement method, and the end-to-end budget. |
 | [Prompts](prompts.md) | Prompt structure, persona, call flow, and conversational guardrails. |
 | [Operations](operations.md) | Scheduling, health checks, alerting, logging, maintenance, and recovery. |
@@ -48,6 +51,7 @@ USB or Android specification enforces them.
 | [ADR-0004: Cloud voice stack](decisions/0004-cloud-voice-stack-first.md) | Use cloud STT, LLM, and TTS providers before local speech models. |
 | [ADR-0005: Real SIM origination](decisions/0005-originate-from-real-sim.md) | Originate calls from a real SIM rather than a VoIP service. |
 | [ADR-0006: Bluetooth HFP audio](decisions/0006-use-bluetooth-hfp-audio.md) | Support Bluetooth HFP as an alternative audio transport while keeping USB as the default. |
+| [ADR-0007: MCP and A2A control plane](decisions/0007-expose-agent-over-mcp-and-a2a.md) | Expose the call agent over MCP and A2A through one shared CallService. |
 
 ## Related documents
 
