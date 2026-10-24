@@ -28,7 +28,7 @@ region. Providers sit behind small interfaces so they can be swapped without cha
 the call state machine or audio bridge. Audio is streamed, not written to disk by
 default, and transcripts are not logged by default.
 
-Local models are a stretch goal for a Pi 4 or Pi 5. They are not part of the Zero 2 W
+Local models are a stretch goal for a larger Linux host. They are not part of the reference
 baseline. The runtime should degrade predictably when a provider is slow or
 unavailable: stop speaking, play a short closing prompt if possible, and end the call
 rather than leaving the line open in silence.
@@ -37,13 +37,13 @@ rather than leaving the line open in silence.
 
 ### Positive
 
-- The Zero 2 W only has to handle audio I/O, resampling, VAD, and network streams.
+- The host only has to handle audio I/O, resampling, VAD, and network streams.
 - Cloud models generally provide better ASR and TTS quality than local models that fit
-  on the Pi.
+  on a small Linux host.
 - Provider-side scaling avoids long local inference queues and thermal throttling.
 - India-region endpoints keep the network contribution within the latency budget.
 - Swapping providers is a configuration and adapter change, not a rewrite.
-- No model weights, GPU, or large storage volume is needed on the Pi.
+- No model weights, GPU, or large storage volume is needed on the host.
 - Streaming APIs support partial transcripts and sentence-chunked TTS, which are
   required for barge-in and turn-taking.
 
@@ -74,15 +74,15 @@ rather than leaving the line open in silence.
 
 ## Alternatives considered
 
-### Fully local on the Zero 2 W
+### Fully local on a small host
 
 Whisper.cpp and Piper can run on small boards, but not comfortably alongside the audio
-bridge on a 512 MB Zero 2 W, and not with the latency and quality needed for a natural
-call. It was rejected for the baseline.
+bridge on a low-power host with 512 MB of RAM, and not with the latency and quality needed
+for a natural call. It was rejected for the baseline.
 
-### Fully local on a Pi 4 or Pi 5
+### Fully local on a larger Linux host
 
-A Pi 4 or Pi 5 can host local models as a stretch goal. It increases cost, power, heat,
+A larger Linux host can run local models as a stretch goal. It increases cost, power, heat,
 and maintenance, and local model quality for Malayalam and code-mixed speech is not yet
 established. It remains a useful fallback and a privacy-preserving option, not the
 first implementation.

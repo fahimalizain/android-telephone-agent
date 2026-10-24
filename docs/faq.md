@@ -1,8 +1,8 @@
 # FAQ
 
-Short answers to common questions about android-telephone-agent. Each answer links to the document
-with the full detail. Hardware behavior that is not fixed by a specification should be verified on your
-device.
+Short answers to common questions about android-telephone-agent. Each answer links to the
+document with the full detail. Device behavior that is not fixed by a specification should
+be verified on your device.
 
 ## Why not root?
 
@@ -16,31 +16,36 @@ See the [design brief](./design-brief.md).
 The project places a real cellular call from a real SIM, so the callee needs no app, data connection, or
 VoIP number. A SIP or Twilio leg would avoid the phone and SIM but would not use the agent SIM's number
 or exercise the same cellular path, and a PSTN gateway is outside the project's scope. The trade-off is
-one phone and one SIM per line. See [hardware](./hardware.md).
+one phone and one SIM per line. See the [design brief](./design-brief.md).
 
 ## Does the callee need an app or data?
 
 No. The callee answers an ordinary voice call on any phone. The caller ID is the agent SIM's number, and
 nothing is installed or configured on the receiving side. See the [design brief](./design-brief.md).
 
+## What host do I need?
+
+A Linux machine with BlueZ, PipeWire, and WirePlumber in the same user session, plus a working
+Bluetooth adapter. A laptop, desktop, or small Linux box works; the validated host was an
+Ubuntu laptop with a Samsung Galaxy A23 4G. The agent must run as the same user that owns the
+PipeWire session, normally as a systemd user service with lingering. See
+[Bluetooth HFP](./bluetooth-hfp.md) for the prerequisites and setup.
+
 ## Can I use any Android phone, including an old one?
 
-For the canonical USB path, the phone needs USB OTG (USB-C on the canonical device), a USB
-audio class implementation that routes call audio, and an Android version that can run the
-helper with the required permissions. For the Bluetooth alternative, it needs HFP support
-and the **Calls and audio** setting; the Galaxy A23 is validated over HFP, but other devices
-vary. An old phone can work as a dedicated device if it meets the requirements for the
-chosen transport and its battery is healthy, but a worn battery or an older USB/Bluetooth
-implementation may make it unreliable. See [Android setup](./android-setup.md),
-[Bluetooth HFP](./bluetooth-hfp.md), and [hardware](./hardware.md).
-
-## Why a Raspberry Pi?
-
-The Pi Zero 2 W is small, inexpensive, runs Linux and Python, and its micro-USB port supports USB device
-mode through `dwc2`. That lets it appear as a USB audio gadget, the canonical path. Bluetooth HFP is a
-supported alternative that does not need USB device mode. A Pi 4 Model B is a supported alternative; the
-Pi 5 cannot act as a USB device. See [Raspberry Pi setup](./raspberry-pi-setup.md) and
+The phone needs Bluetooth HFP support and the **Calls and audio** setting, an Android
+version that can run the helper with the required permissions, and a healthy battery. The
+Galaxy A23 is validated over HFP; other devices vary. An old phone can work as a dedicated
+device if it meets those requirements, but a worn battery or an older Bluetooth
+implementation may make it unreliable. See [Android setup](./android-setup.md) and
 [Bluetooth HFP](./bluetooth-hfp.md).
+
+## Does it work over USB?
+
+No. Bluetooth HFP is the only supported audio transport. The earlier Pi-based and USB
+Audio Class route was removed on 2026-10-24; its scripts, units, hardware guide, and
+power documentation no longer exist. The phone's USB port is used only for charging. See
+[ADR 0009](./decisions/0009-bluetooth-only-linux-host.md).
 
 ## Can it run on the phone itself?
 
@@ -56,13 +61,12 @@ streamed and not written to disk. Local transcripts are opt-in with
 `[transcript].enabled = true`. When enabled, the runtime writes one timestamped JSONL file
 per call, created with mode `0600` in a `0700` directory, containing the full E.164 number
 when known (inbound calls have no caller ID), verbatim callee and agent text, and call
-metadata. The file stays on-device and is
-intentionally not masked, unlike the operational stdout and journald logs. Delete
-transcripts on a retention schedule. On the text path, audio goes to the configured STT
-provider and text to the LLM and TTS providers; with `realtime.kind = "grok"`, audio goes to
-xAI instead. Provider retention policies apply either way. A debug audio capture, if
-enabled, should be opt-in, consented, short, and deleted afterward. See
-[operations](./operations.md) and [Inbound calls](./inbound.md).
+metadata. The file stays on-device and is intentionally **not masked**, unlike the
+operational stdout and journald logs. Delete transcripts on a retention schedule. On the
+text path, audio goes to the configured STT provider and text to the LLM and TTS providers;
+with `realtime.kind = "grok"`, audio goes to xAI instead. Provider retention policies apply
+either way. A debug audio capture, if enabled, should be opt-in, consented, short, and
+deleted afterward. See [operations](./operations.md) and [Inbound calls](./inbound.md).
 
 ## Is this legal? What about TRAI and TCPA?
 
@@ -85,22 +89,24 @@ optional Grok Voice realtime adapter documents English, Hindi, and Bengali but n
 
 The target is under 1.2 seconds from the end of the callee's utterance to the start of agent speech,
 with a budget split across network, STT, LLM, TTS, and buffering. Real latency depends on the provider
-region, Wi-Fi, and cellular codec, and can exceed 2 seconds on a poor link. Measure it from logs rather
-than judging by ear. See [latency budget](./latency-budget.md).
+region, Wi-Fi, Bluetooth codec, and cellular path, and can exceed 2 seconds on a poor link. No
+end-to-end measurement exists yet, including on the validated Bluetooth run. Measure it from logs
+rather than judging by ear. See [latency budget](./latency-budget.md).
 
 ## What does it cost to run?
 
-The hardware is approximately ₹7,000 in India, excluding the phone, SIM, and charger; verify current
-prices. Ongoing costs are the SIM plan, electricity for the Pi and phone charging, and provider usage
-for STT, LLM, and TTS on the text path. Realtime speech-to-speech is billed per minute of audio and can
-cost several times more. Provider pricing changes, so estimate from current rates rather than a fixed
-figure. See [hardware](./hardware.md) and [BOM](./bom.csv).
+The host is hardware you supply; there is no fixed bill of materials. Ongoing costs are the
+SIM plan, electricity for the host and phone charging, and provider usage for STT, LLM, and
+TTS on the text path. Realtime speech-to-speech is billed per minute of audio and can cost
+several times more. Provider pricing changes, so estimate from current rates rather than a
+fixed figure. See [voice agent](./voice-agent.md) for the cost model.
 
 ## Can it call multiple people?
 
-One Pi and one phone place one call at a time. You can schedule sequential calls with enough gap for the
-phone to return to idle, or run one phone and one Pi per number. Parallel calls on one gadget are not
-supported, and a conferencing bridge is out of scope. See [operations](./operations.md).
+One host and one phone place one call at a time. You can schedule sequential calls with
+enough gap for the phone to return to idle, or run one phone and one host per number.
+Parallel calls on one Bluetooth link are not supported, and a conferencing bridge is out of
+scope. See [operations](./operations.md).
 
 ## Can it answer inbound calls?
 
@@ -124,59 +130,39 @@ implemented; WhatsApp requires the Business API and a different architecture. Se
 
 ## What happens on a power cut?
 
-The phone survives on its battery, but the Pi and router stop unless they are on a UPS. A call in
-progress fails, and a missed slot is skipped rather than placed late. On restore, the system waits for
-time synchronization, re-arms the gadget, and alerts on the missed call. See
-[operations](./operations.md).
+The phone survives on its battery, but the host and router stop unless they have their own
+backup. A call in progress fails, and a missed slot is skipped rather than placed late. On
+restore, the system waits for time synchronization, reconnects Bluetooth, and alerts on the
+missed call. See [operations](./operations.md).
 
 ## Is the helper endpoint secure?
 
 It is designed for the LAN only, and call control requires a bearer token. The reference helper's
 `/health` is unauthenticated and exposes only the device model and SIM label; firewall port 8765 so only
-the Pi can reach it. Keep the token in a root-readable environment file, rotate it by rebuilding the
+the host can reach it. Keep the token in an owner-readable environment file, rotate it by rebuilding the
 APK, and never port-forward the endpoint. Plain HTTP is acceptable only on a trusted LAN; use a separate
 VLAN or TLS on a shared network. See [operations](./operations.md).
 
-## Can I use Bluetooth instead of USB?
-
-Yes. Bluetooth HFP is a supported alternative transport: the Linux host acts as the
-hands-free unit (HF), Phone A as the audio gateway (AG), and PipeWire exposes the call as
-a SCO source and sink. USB remains the default and canonical path. The caveats are that
-pairing and reconnection add failure modes, SCO nodes exist only during a call, the agent
-must run in the same user session as PipeWire/WirePlumber, and Bluetooth shares 2.4 GHz
-spectrum with Wi-Fi. mSBC gives a 16 kHz link, but the cellular codec still caps fidelity.
-Dialing and hangup still go through the LAN helper. The path has been validated end to end
-on a laptop with a Galaxy A23 4G over outbound PSTN calls, including a Grok Voice
-conversation, but not on a Pi Zero 2 W, live inbound calls, or end-to-end latency. See
-[Bluetooth HFP](./bluetooth-hfp.md) and
-[ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
-
-## Why not a Raspberry Pi 5?
-
-The Pi 5 cannot operate as a USB device, so it cannot present the UAC gadget to the phone. Use a Pi Zero
-2 W, or a Pi 4 Model B powered through the GPIO header so its USB-C port remains available. A Pi 5 could
-use the Bluetooth HFP alternative in principle, but that path is unverified on a Pi 5 and is not the
-canonical build. See [Raspberry Pi setup](./raspberry-pi-setup.md) and
-[Bluetooth HFP](./bluetooth-hfp.md).
-
 ## What if the phone reboots?
 
-The helper should start at boot, keep its battery exemption, and restore the foreground service. The Pi
-must detect the re-enumeration and re-arm the gadget, and the agent should wait for `/health` before
-dialing. A reboot during a slot usually means a missed call and an alert. Verify autostart behavior on
-your device. See [Android setup](./android-setup.md) and [runbook](./runbook.md).
+The helper should start at boot, keep its battery exemption, and restore the foreground service. The host
+should wait for `/health` before dialing and may need to reconnect the Bluetooth link; pairing and trust
+help, but reconnection is best effort. A reboot during a slot usually means a missed call and an alert.
+Verify autostart behavior on your device. See [Android setup](./android-setup.md) and
+[runbook](./runbook.md).
 
 ## How do I change the schedule?
 
-Edit the timer's `OnCalendar` expression or the application's slot configuration, keep the zone as an
-IANA name such as `Asia/Kolkata`, then run `sudo systemctl daemon-reload` and confirm with
-`systemctl list-timers --all`. Keep `Persistent=false` and the grace window so a missed run is skipped
-rather than placed late. Test the new slot with a supervised call. See [operations](./operations.md).
+Edit the user timer's `OnCalendar` expression or the application's slot configuration, keep the zone as
+an IANA name such as `Asia/Kolkata`, then run `systemctl --user daemon-reload` and confirm with
+`systemctl --user list-timers --all`. Keep `Persistent=false` and the grace window so a missed run is
+skipped rather than placed late. Test the new slot with a supervised call. See
+[operations](./operations.md).
 
 ## Related documents
 
-[Design brief](./design-brief.md), [hardware](./hardware.md),
-[Raspberry Pi setup](./raspberry-pi-setup.md), [Bluetooth HFP](./bluetooth-hfp.md),
-[Android setup](./android-setup.md), [operations](./operations.md), [runbook](./runbook.md),
+[Design brief](./design-brief.md), [Bluetooth HFP](./bluetooth-hfp.md),
+[Android setup](./android-setup.md), [Inbound calls](./inbound.md),
+[operations](./operations.md), [runbook](./runbook.md),
 [troubleshooting](./troubleshooting.md), and the
-[service unit](../scripts/systemd/telephone-agent.service).
+[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service).

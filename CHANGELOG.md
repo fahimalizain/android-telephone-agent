@@ -10,16 +10,15 @@ The project is at alpha; minor versions may change APIs and file layout.
 
 ### Added
 
-- Bluetooth HFP alternative to the USB gadget: the Linux host acts as the
-  Hands-Free Profile headset (HF) and Phone A as the audio gateway (AG).
+- Bluetooth HFP audio path: the Linux host acts as the Hands-Free Profile headset
+  (HF) and Phone A as the audio gateway (AG).
 - `PipeWireAudio` runtime backend using `pw-record`/`pw-play` and SCO node
-  discovery for both call directions; the USB gadget backend remains the
-  default.
+  discovery for both call directions.
 - `audio.backend`, `audio.bluetooth_address`, and `audio.node_timeout_s`
   configuration, with Bluetooth examples and validation.
-- Bluetooth HFP setup, check, and audio-test scripts plus an ADR and setup guide.
-- systemd user unit and timer examples for the Bluetooth backend; the existing
-  system unit remains for the USB gadget path.
+- Bluetooth HFP setup, check, and audio-test scripts plus an ADR and host guide.
+- systemd user unit and timer examples for the Bluetooth outbound path and the
+  inbound watcher.
 - Tests for SCO node discovery, Bluetooth configuration validation, and CLI
   backend wiring.
 - `CallService`, a long-lived, protocol-agnostic control plane with a FIFO task queue,
@@ -61,6 +60,27 @@ The project is at alpha; minor versions may change APIs and file layout.
 - Opt-in local call transcripts: `[transcript]` writes one timestamped JSONL file per
   call with full conversation detail, mode `0600` in a `0700` directory under
   `runtime/transcripts` by default. Audio is not persisted.
+
+### Changed
+
+- The supported deployment is now a Linux host plus an Android phone over Bluetooth HFP.
+  Documentation, scripts, and systemd units were rewritten around BlueZ, PipeWire,
+  WirePlumber, systemd user units, and the LAN helper.
+- `docs/decisions/0006-use-bluetooth-hfp-audio.md` now records Bluetooth HFP as the only
+  supported audio transport. ADR 0009 records the pivot from the earlier hardware route.
+- Repository maps, health checks, runbooks, and issue templates now describe the Linux host
+  and the Bluetooth link instead of the earlier single-board-computer and USB audio route.
+
+### Removed
+
+- The Raspberry Pi + USB Audio Class gadget route, including `scripts/uac-gadget.sh`,
+  `scripts/install.sh`, `scripts/audio-loopback-test.sh`,
+  `scripts/systemd/uac-gadget.service`, `scripts/systemd/telephone-agent.service`, and
+  `scripts/systemd/telephone-agent.timer`.
+- The Raspberry Pi setup, hardware, bill-of-materials, and power-and-thermal documents:
+  `docs/raspberry-pi-setup.md`, `docs/hardware.md`, `docs/bom.csv`, and
+  `docs/power-and-thermal.md`.
+- The ALSA `GadgetAudio` backend and its USB gadget configuration path.
 
 ### Fixed
 

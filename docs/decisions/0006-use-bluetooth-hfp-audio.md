@@ -1,20 +1,19 @@
-# ADR 0006: Support Bluetooth HFP as an alternative audio transport
+# ADR 0006: Use Bluetooth HFP as the audio transport
 
-- Status: Accepted as a supported alternative; USB remains the default
+- Status: Accepted; Bluetooth HFP is now the only supported audio transport
 - Date: 2026-10-24
 - Deciders: Project owner
 
+> **Update (2026-10-24).** [ADR 0009](./0009-bluetooth-only-linux-host.md) removed the
+> earlier Pi-based and USB Audio Class route. Bluetooth HFP is now the only supported
+> transport, not an alternative. The context and validation notes below are kept from the
+> original decision, with a later validation note.
+
 ## Context
 
-The canonical topology makes the Pi Zero 2 W a USB Audio Class 1 gadget. Phone A
-enumerates it as a wired headset and routes call audio to it. That path is deterministic,
-needs no pairing, and is the default for this project.
-
-USB is not always available or convenient. A host that cannot act as a USB device (a
-laptop or a mini PC) cannot present the gadget. A hub can be unstable, a port can
-be occupied, or the phone can refuse to route call audio to a particular USB device. Some
-installations also want the phone's USB port free for charging or for `adb` during
-development. A second transport is useful in those cases.
+The earlier design made a small board a USB Audio Class 1 device. Phone A enumerated it
+as a wired headset and routed call audio to it. That path needed USB device mode, a
+data-capable port, and a powered hub, and it was never validated on hardware.
 
 Bluetooth Hands-Free Profile (HFP) is the standard profile Android already uses for car
 kits and headsets. The phone is the audio gateway (AG); the Linux host is the hands-free
@@ -22,13 +21,13 @@ unit (HF). The phone routes call audio to the HF over a synchronous SCO link, an
 sees the downlink and uplink as PipeWire nodes. No root, vendor API, or modem access is
 involved.
 
-This alternative was validated on a Linux laptop (MSI GL738SE) running Ubuntu with BlueZ
-5.85, PipeWire 1.6.2, and WirePlumber 0.5.13, paired with a Samsung Galaxy A23. After
-restarting WirePlumber, the local adapter advertised the Headset (UUID 0x1108) and
-Handsfree (UUID 0x111e) services, and the phone showed **Calls and audio** enabled. The
-HFP service-level connection was confirmed in WirePlumber debug logs, including
-`/Profile/HFPHF`, `AT+CLIP`, `AT+CCWA`, `AT+CMEE`, `AT+CLCC`, `AT+VGS`, and `AT+VGM`, plus
-the AG indicators for call, call setup, service, signal, and battery.
+The original validation used a Linux laptop (MSI GL738SE) running Ubuntu with BlueZ 5.85,
+PipeWire 1.6.2, and WirePlumber 0.5.13, paired with a Samsung Galaxy A23. After restarting
+WirePlumber, the local adapter advertised the Headset (UUID 0x1108) and Handsfree (UUID
+0x111e) services, and the phone showed **Calls and audio** enabled. The HFP service-level
+connection was confirmed in WirePlumber debug logs, including `/Profile/HFPHF`,
+`AT+CLIP`, `AT+CCWA`, `AT+CMEE`, `AT+CLCC`, `AT+VGS`, and `AT+VGM`, plus the AG indicators
+for call, call setup, service, signal, and battery.
 
 During an active Google Meet call, audio was bidirectional through the laptop's built-in
 speaker and microphone. The SCO codec negotiated was mSBC at 16 kHz, with
@@ -36,16 +35,23 @@ speaker and microphone. The SCO codec negotiated was mSBC at 16 kHz, with
 `pw-record` captured the SCO source, and `pw-play` injected a test tone into the SCO sink.
 The far end of the Meet call was confirmed to hear the host audio.
 
-What was **not** validated: a PSTN call over Bluetooth (the test call was Google Meet),
-the Raspberry Pi Zero 2 W (the test host was a laptop), and HFP call control from Linux.
-Dialing and hangup still go through the LAN helper app.
+A later validation on 2026-10-24 used outbound PSTN calls through the LAN helper. Audio
+ran over HFP SCO at mSBC 16 kHz in both directions, and the Grok Voice realtime adapter
+held a real conversation: five turns in 68.1 s, with the model requesting `end_call` and
+the helper accepting `/hangup` with `202`. The link was weak (RSSI about -87 dBm); the
+first call dropped during setup and needed a manual reconnect, and later calls were
+stable.
+
+What was **not** validated: live inbound PSTN calls, end-to-end latency, and HFP call
+control from Linux. Dialing and hangup still go through the LAN helper app. Bluetooth
+carries audio only, and SCO nodes exist only after a call is answered.
 
 ## Decision
 
-Bluetooth HFP is a supported alternative audio transport. It is opt-in with
-`[audio] backend = "pipewire"`; the default remains `backend = "alsa"` with the USB
-gadget's `card` and `device`. The USB path, its scripts, and its documentation remain
-canonical and are not removed.
+Bluetooth HFP is the only supported audio transport. The Linux host advertises the HF
+role and Phone A is the AG. The agent uses `[audio] backend = "pipewire"` and discovers
+the call-scoped SCO nodes by Bluetooth address and factory name. There is no fallback
+audio backend and no USB data link.
 
 On the host, WirePlumber advertises the HF role with this fragment:
 
@@ -72,24 +78,26 @@ nodes exist only while a call or SCO link is active, the backend waits up to
 `node_timeout_s` (default 30 s) for them before failing.
 
 The agent runs as the same user as PipeWire and WirePlumber. On a headless install this
-normally means a systemd **user** service with lingering enabled; the existing system-level
-one-shot unit for the USB path does not work unchanged for Bluetooth.
+normally means a systemd **user** service with lingering enabled. A system-level service
+for another user cannot see the SCO nodes.
 
-HFP call control (ATD, ATA, CHUP, and similar) is not implemented. The existing LAN helper
-app remains the only call-control mechanism: `GET /health`, `POST /call`, `POST /hangup`.
-Phone A must be reachable on the LAN whether the audio transport is USB or Bluetooth.
+HFP call control (ATD, ATA, CHUP, and similar) is not implemented. The LAN helper app is
+the only call-control mechanism: `GET /health`, `GET /state`, `POST /call`, `POST /answer`,
+and `POST /hangup`. Phone A must be reachable on the LAN.
 
 ## Consequences
 
 ### Positive
 
-- No USB data cable or UAC gadget is needed; the phone's USB port stays free for charging.
-- The host does not need USB device mode, so a laptop or mini PC can run the agent.
+- No USB data cable or USB audio device is needed; the phone's USB port stays free for
+  charging.
+- The host does not need USB device mode, so a laptop, desktop, or mini PC can run the
+  agent.
 - HFP is a standard profile, and Android already routes call audio to a Bluetooth headset.
 - mSBC provides a 16 kHz wideband link, better than narrowband CVSD SCO.
 - PipeWire exposes both directions as inspectable nodes, and no root or vendor API is used.
-- The transport works alongside the existing helper app and call state machine; only the
-  audio backend changes.
+- The transport works alongside the helper app and call state machine; only the audio
+  backend changes.
 - The phone UI gives a direct confirmation: **Calls and audio** is enabled for the host.
 
 ### Negative
@@ -97,20 +105,17 @@ Phone A must be reachable on the LAN whether the audio transport is USB or Bluet
 - SCO nodes exist only during a call. The agent must wait for them, and a call that ends
   removes them while capture is running.
 - The agent must run in the same user session as PipeWire and WirePlumber. This is a
-  deployment constraint the USB path does not have.
+  deployment constraint.
 - Pairing, reconnection, and profile selection are additional failure modes. A phone can
   connect but fail to enable call audio, or route to its earpiece or speaker.
 - Bluetooth shares the 2.4 GHz band with Wi-Fi. Coexistence can add latency, jitter, and
-  dropouts, especially on a Pi Zero 2 W with a single 2.4 GHz radio.
+  dropouts, especially on a host with a single shared radio.
 - HFP call control is not implemented, so the phone must still be reachable over the LAN.
 - The link is point-to-point: one host, one phone, one call at a time.
 - mSBC is 16 kHz, but the cellular codec still caps end-to-end fidelity. Bluetooth does not
   make the call wideband if the network leg is narrowband.
 - mSBC is not guaranteed on every phone or adapter; the link can fall back to 8 kHz CVSD.
-- The Raspberry Pi Zero 2 W path is expected to work but is unverified. The validation used
-  a laptop.
-- No PSTN call has been tested over Bluetooth; only a Google Meet call and the SCO audio
-  path were validated.
+- No live inbound PSTN call has been validated, and latency has not been measured.
 
 ### Risks
 
@@ -137,12 +142,12 @@ Phone A must be reachable on the LAN whether the audio transport is USB or Bluet
 
 ## Alternatives considered
 
-### USB Audio Class 1 gadget (canonical)
+### USB Audio Class route (removed)
 
-The USB path remains the default. It avoids pairing and codec negotiation, has explicit
-playback and capture endpoints, and is easier to make deterministic for unattended
-operation. Bluetooth is an alternative for hosts or installations where USB device mode is
-unavailable or unsuitable, not a replacement.
+The earlier route made the host a USB Audio Class device. It avoided Bluetooth pairing
+and codec negotiation but required USB device mode, a data-capable phone port, and a
+powered hub, and it was never hardware-validated for this project. It was removed on
+2026-10-24; see [ADR 0009](./0009-bluetooth-only-linux-host.md).
 
 ### Linux host as HFP audio gateway, phone as HF
 
@@ -152,29 +157,27 @@ routing behavior, and was not validated. It is not supported by this decision.
 
 ### Acoustic coupling
 
-Holding the phone near a speaker and microphone avoids USB and Bluetooth entirely, but it
-is the least deterministic option: levels drift, room noise enters both directions, and
-the phone's echo cancellation and noise suppression interfere. It remains rejected for
-both transports.
+Holding the phone near a speaker and microphone avoids Bluetooth entirely, but it is the
+least deterministic option: levels drift, room noise enters both directions, and the
+phone's echo cancellation and noise suppression interfere. It remains rejected.
 
 ### USB Bluetooth adapter
 
 A dedicated USB Bluetooth adapter could improve range or isolate Bluetooth from the
-onboard Wi-Fi radio. It adds hardware, power draw, and another failure domain, and was not
-tested. The onboard adapter is sufficient for the validated laptop setup, and the Pi's
-onboard Bluetooth is expected to work but is unverified.
+host's Wi-Fi radio. It adds hardware, power draw, and another failure domain, and was not
+tested. An onboard adapter is sufficient for the validated setup.
 
 ### Root or private Android APIs
 
 Root does not create a writable uplink endpoint, and private APIs vary by build. Both
-remain out of scope for the same reasons as the USB path.
+remain out of scope for the same reasons as before.
 
 ## References
 
 - [Bluetooth HFP guide](../bluetooth-hfp.md).
-- [Architecture](../architecture.md), sections 4.1 and 10.
-- [ADR 0001: Use a USB Audio Class gadget instead of root](./0001-use-usb-audio-gadget-instead-of-root.md).
-- [Design brief](../design-brief.md), sections 3 and 7.
+- [Architecture](../architecture.md), sections 4, 7, and 10.
+- [ADR 0009: Bluetooth-only Linux host](./0009-bluetooth-only-linux-host.md).
+- [Design brief](../design-brief.md), sections 3, 4, and 7.
 - WirePlumber fragment: [`config/wireplumber/51-bt-headset.conf`](../../config/wireplumber/51-bt-headset.conf).
 - Bluetooth check script: [`scripts/bluetooth-check.sh`](../../scripts/bluetooth-check.sh).
 - [WirePlumber Bluetooth configuration](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/bluetooth.html).

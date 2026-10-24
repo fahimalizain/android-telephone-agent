@@ -56,11 +56,11 @@ and provider credentials, and control of the phone's dialer. The main threats ar
   those providers.
 - **Personal data in logs and reports.** Call metadata, phone numbers, and transcripts
   can identify the owner or the callee. Redact identifiers before sharing logs in an
-  issue. Journald is configured for volatile storage to reduce SD card wear; that is not
-  a substitute for redaction.
-- **Physical and host access.** Anyone with physical access to the phone, the Pi, or the
-  SD card can read configuration and place calls. Use screen lock on the phone, keep the
-  Pi in a controlled space, and do not reuse the helper token elsewhere.
+  issue. Volatile journald storage reduces disk writes; that is not a substitute for
+  redaction.
+- **Physical and host access.** Anyone with physical access to the phone or the Linux host
+  can read configuration and place calls. Use screen lock on the phone, keep the host in a
+  controlled space, and do not reuse the helper token elsewhere.
 - **Regulatory and abuse risk.** The project is for personal use. Using it for spam,
   impersonation, or caller-ID evasion is misuse, not an accepted feature.
 
@@ -68,10 +68,11 @@ and provider credentials, and control of the phone's dialer. The main threats ar
 
 The following are generally out of scope for this policy:
 
-- Vulnerabilities in Android, One UI, Raspberry Pi OS, the cellular network, or
-  third-party STT, LLM, and TTS providers. Report those to the respective vendor.
+- Vulnerabilities in Android, One UI, the Linux distribution, BlueZ, PipeWire,
+  WirePlumber, the cellular network, or third-party STT, LLM, and TTS providers. Report
+  those to the respective vendor.
 - Attacks that require an unlocked bootloader, root, a malicious system image, or
-  prolonged physical access to the phone or Pi.
+  prolonged physical access to the phone or host.
 - Denial of service against your own LAN, and misconfiguration of a router or firewall
   that exposes the helper endpoint.
 - Regulatory compliance, consent for recorded conversations, and lawful use of
@@ -84,6 +85,6 @@ The following are generally out of scope for this policy:
 
 - Keep the helper endpoint on a private interface and require its bearer token.
 - Rotate the helper token and provider keys after any suspected exposure.
-- Keep the phone and Pi patched, and review the helper app's permissions.
+- Keep the phone and host patched, and review the helper app's permissions.
 - Monitor heartbeat alerts for unexpected calls or failed calls.
 - Do not record calls unless you have the consent required in your jurisdiction.

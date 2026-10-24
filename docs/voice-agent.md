@@ -3,38 +3,40 @@
 Status: design complete, pre-implementation (alpha)
 Last updated: 2026-10-24
 
-Purpose: turn the duplex audio stream exposed by the USB gadget into a natural
+Purpose: turn the duplex audio stream exposed by Bluetooth HFP SCO into a natural
 spoken conversation. This document defines the reference pipeline, timing rules,
 and failure behavior. It assumes the audio path in
-[architecture](./architecture.md), the gadget setup in
-[Raspberry Pi setup](./raspberry-pi-setup.md), and the runtime layout in
+[architecture](./architecture.md), the host setup in
+[Bluetooth HFP](./bluetooth-hfp.md), and the runtime layout in
 [agent/README](../agent/README.md).
 
 ## Pipeline
 
 ```mermaid
 flowchart LR
-  A["Gadget capture<br/>48 kHz stereo<br/>(Phone A downlink)"] --> B["Downmix and resample<br/>16 kHz mono"]
+  A["SCO source<br/>16 kHz mSBC<br/>or 8 kHz CVSD<br/>(Phone A downlink)"] --> B["Resample<br/>16 kHz mono"]
   B --> C["VAD and<br/>turn detector"]
   C --> D["Streaming STT<br/>partials and final"]
   D --> E["LLM<br/>streaming tokens"]
   E --> F["Streaming TTS<br/>sentence chunks"]
-  F --> G["Resample<br/>48 kHz stereo"]
-  G --> H["Gadget playback<br/>(Phone A uplink)"]
+  F --> G["Resample to<br/>the SCO rate"]
+  G --> H["SCO sink playback<br/>(Phone A uplink)"]
   C -. "barge-in / stop" .-> H
   H -. "playback state" .-> C
 ```
 
-`arecord` receives what Phone A would play in its earpiece, the remote party;
-`aplay` sends audio to Phone A's microphone input, which the remote party hears.
-Confirm this inversion with the loopback test before connecting the agent.
+`pw-record` from the SCO source receives the remote party's voice;
+`pw-play` to the SCO sink sends audio toward Phone A's microphone path, which the remote
+party hears. The direction is direct; unlike the removed USB audio route, there is no
+inversion. Confirm the mapping with `scripts/bluetooth-check.sh` and
+`scripts/bluetooth-audio-test.sh` during a call before connecting the agent. Dialing,
+answering, and hangup go through the LAN helper; the voice pipeline only sees audio.
 
-Use 20 ms frames end to end: 960 samples at 48 kHz, 320 at 16 kHz. Resample with
-an anti-alias filter; without one, aliasing above 8 kHz folds into speech. Keep
-capture, network, and playback in separate buffers so no call blocks the ALSA
-callback. Target a 40–80 ms playback jitter buffer; larger buffers hide Wi-Fi
-jitter but add latency. Timestamp frames with a monotonic clock at capture and
-playback; see [latency budget](./latency-budget.md).
+Use 20 ms frames end to end: 320 samples at 16 kHz. Resample with an anti-alias filter;
+without one, aliasing above 8 kHz folds into speech. Keep capture, network, and playback
+in separate buffers so no call blocks the PipeWire stream. Target a 40–80 ms playback
+jitter buffer; larger buffers hide Wi-Fi jitter but add latency. Timestamp frames with a
+monotonic clock at capture and playback; see [latency budget](./latency-budget.md).
 
 ## VAD and turn detection
 
@@ -145,8 +147,9 @@ Optimize TTS for first-audio latency (target 150–300 ms): a plain voice at
 - Target 40–80 characters for the first chunk. Never split a name, number, time,
   or currency amount across chunks.
 - Start playback when the first audio arrives; do not wait for the full reply.
-- Request PCM or µ-law. Decode 8 kHz µ-law to linear PCM and resample to 48 kHz;
-  resample 24 kHz PCM and duplicate mono to both gadget channels.
+- Request PCM or µ-law. Decode 8 kHz µ-law to linear PCM and resample to 16 kHz
+  for the pipeline; resample the output to the SCO rate (16 kHz with mSBC, 8 kHz
+  with CVSD) and keep it mono. PipeWire handles the stream-to-link conversion.
 
 Choose a voice intelligible on a phone speaker, not one that is expressive in a
 studio demo, and use the same voice for Malayalam and English. Prefer a documented
@@ -182,16 +185,15 @@ please continue" only if the callee is waiting; never replay the old reply.
 
 ## Echo and self-hearing
 
-In the intended routing, the USB path is electrical, not acoustic. The Pi sends
-playback to Phone A's microphone input; Phone A sends downlink audio to the Pi.
-The phone's speaker and microphone are not in the loop, so there is no acoustic
-echo path between agent output and agent input.
+Bluetooth HFP is not an acoustic path between the host and the phone's speaker.
+The SCO link carries the call audio directly, so the host's microphone is not
+part of the loop. There is no local speaker-to-microphone coupling on the host.
 
 Echo can still occur. The far end may be on speakerphone, or the PSTN hybrid may
 reflect the agent's voice after a delay. Phone A may keep its own speaker or
-microphone active alongside the headset, creating an acoustic path; verify actual
-routing rather than assuming it from the gadget's presence. Electrical crosstalk
-in a hub, charger, or cable can cause TTS bleed into capture.
+microphone active alongside the Bluetooth route, creating an acoustic path;
+verify actual routing during a call rather than assuming it from the HFP
+connection. A headset or handset route at the far end reduces echo.
 
 Keep a 150–250 ms guard after playback starts; do not trigger barge-in during the
 guard, but treat energy that persists afterward as speech. A correlation check
@@ -213,6 +215,9 @@ echo cancellation by default: it costs CPU and can distort speech.
 - There is no reliable answering-machine detection on this path. Do not build the
   flow around a carrier AMD score. Use speech onset on the downlink as the answer
   signal, then apply voicemail heuristics.
+- SCO nodes appear after the call is answered, not while it is ringing. Do not
+  wait for audio before the answer; the helper's `/state` is the signaling path
+  for inbound calls.
 - If the line is silent after answer, prompt once: "Hello, can you hear me?" If
   there is still no speech, end the call.
 - Do not talk over a voicemail greeting. If it is clearly a mailbox and policy
@@ -257,13 +262,13 @@ the adapter stops local playback on speech onset. Two function tools are
 available: `end_call` and, for delegated calls, `consult`.
 
 `realtime.greeting` optionally makes the agent speak first. Once the call audio
-backend is ready (`audio.start()` returns: the ALSA device is open or the
-Bluetooth SCO nodes exist) and before any call frames are streamed, the adapter
-sends one system-role `conversation.item.create` asking the model to deliver the
-configured line, followed by a single `response.create`. An empty greeting (the
-default) sends neither event and preserves listen-first behavior. Scheduled
-outbound calls use this to open the conversation; the inbound-call path will use
-the same helper after its own audio setup.
+backend is ready (`audio.start()` returns: the SCO nodes exist and the streams
+are open) and before any call frames are streamed, the adapter sends one
+system-role `conversation.item.create` asking the model to deliver the configured
+line, followed by a single `response.create`. An empty greeting (the default)
+sends neither event and preserves listen-first behavior. Scheduled outbound calls
+use this to open the conversation; the inbound-call path uses the same helper
+after its own audio setup.
 
 xAI's documented realtime languages include English, Hindi, and Bengali but not
 Malayalam as of 2026-10. Test Malayalam-English code-mixing before relying on
@@ -272,17 +277,18 @@ Malayalam quality is the priority.
 
 ## Local fallback
 
-Whisper.cpp plus Piper keeps audio on the LAN and removes provider outages, but
-it is not a drop-in replacement for cloud services on this hardware.
+Whisper.cpp plus Piper keeps audio on the LAN and removes provider outages, but it
+is not a drop-in replacement for cloud services on a small host.
 
-- **Pi 4 Model B (2 GB or more).** Runs quantized Whisper and Piper at usable
-  speed and can also act as the UAC1 gadget, but STT, TTS, and resampling compete
-  for four cores. Expect higher, less predictable latency on the first turn.
-- **Pi 5.** Faster, but it cannot operate in USB device mode, so it cannot be the
-  gadget. It could run inference on the LAN while a Zero 2 W remains the gadget,
-  adding a network hop and another failure domain.
-- **Pi Zero 2 W.** Not comfortable for local Whisper plus Piper. Its 512 MB RAM
-  and four small A53 cores already carry the audio bridge.
+- **Larger Linux host.** A desktop or mini PC with several cores and enough RAM
+  can run quantized Whisper and Piper at usable speed, but STT, TTS, and
+  resampling compete for CPU. Expect higher, less predictable latency on the
+  first turn.
+- **Laptop-class host.** The validated laptop handled the audio bridge and cloud
+  pipeline, but local speech models would compete with the rest of the desktop.
+  Measure before relying on it for unattended calls.
+- **Small host.** A low-power box may not fit local Whisper plus Piper alongside
+  PipeWire. Keep cloud STT/TTS for the reference configuration.
 
 Piper coverage for Malayalam is limited, and Whisper's Malayalam accuracy is
 below the better cloud models, especially on code-mixed and narrowband audio.
@@ -326,9 +332,9 @@ trade-off and must be documented for users, as required by the design brief.
 
 ## Failure handling
 
-Failures are expected on a Pi, a Wi-Fi link, and a cellular call. Each stage needs
-a bounded retry and a spoken fallback. Never leave the agent silent while a client
-library retries.
+Failures are expected on a Bluetooth link, a Wi-Fi network, and a cellular call. Each
+stage needs a bounded retry and a spoken fallback. Never leave the agent silent while a
+client library retries.
 
 | Failure | Detection | Action | Spoken fallback |
 |---|---|---|---|
@@ -341,6 +347,7 @@ library retries.
 | Network loss | Provider socket closed | Reconnect once; if still down, close gracefully | "I'm losing the connection. I'll try again later." |
 | Helper hangup failure | No confirmation | Release audio, stop session, log | "Thanks. Goodbye." |
 | Provider rate limit | 429 or equivalent | Back off once; switch provider if configured | "One moment, please." |
+| SCO nodes missing | `audio.start()` times out | End the session and ask the helper to hang up | None; the call is not usable |
 
 At most two retries per stage per turn, then degrade or end. Never retry a tool
 call with side effects unless it is idempotent. If no audio can be produced, hang
@@ -369,6 +376,7 @@ Test offline, with scripted live calls, and in production sampling.
 ## Known limitations
 
 Manglish accuracy varies by provider; answering-machine detection relies on
-speech onset and voicemail heuristics; the cellular codec caps fidelity; the Zero
-2 W may not fit Silero VAD or local STT; provider pricing changes; echo settings
-are device-specific.
+speech onset and voicemail heuristics; the cellular codec caps fidelity; a small
+host may not fit Silero VAD or local STT; provider pricing changes; echo settings
+are device-specific. Bluetooth SCO nodes exist only during a call, and a weak
+link can drop during setup.

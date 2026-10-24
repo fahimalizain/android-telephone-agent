@@ -1,8 +1,13 @@
 # ADR 0002: Power the phone and gadget through a USB-C PD hub
 
-- Status: Accepted
+- Status: Superseded by [ADR 0009](./0009-bluetooth-only-linux-host.md)
 - Date: 2026-10-24
+- Superseded: 2026-10-24
 - Deciders: Project owner
+
+> **Status: Superseded by ADR 0009 (2026-10-24).** The Raspberry Pi and USB audio gadget
+> route was removed. This record is retained for history; do not use it as current setup
+> guidance.
 
 ## Context
 
@@ -104,6 +109,6 @@ workaround rather than the default.
 
 - [Design brief](../design-brief.md), section 6.
 - [Architecture](../architecture.md), sections 5 and 9.
-- [Hardware](../hardware.md).
-- [Power and thermal](../power-and-thermal.md).
+- The hardware and power-and-thermal documents were removed; see
+  [ADR 0009: Bluetooth-only Linux host](./0009-bluetooth-only-linux-host.md).
 - [ADR 0003: Raspberry Pi Zero 2 W](./0003-run-on-pi-zero-2w.md).

@@ -6,7 +6,8 @@ Last updated: 2026-10-24
 Purpose: define the latency target for a spoken turn, show how to measure it,
 and describe what to do when the measured system misses the target. Pipeline:
 [voice agent](./voice-agent.md); context: [architecture](./architecture.md),
-[Raspberry Pi setup](./raspberry-pi-setup.md), [agent/README](../agent/README.md); prompts: [prompts](./prompts.md).
+[Bluetooth HFP](./bluetooth-hfp.md), [agent/README](../agent/README.md); prompts:
+[prompts](./prompts.md).
 
 The optional Grok Voice realtime adapter (`realtime.kind = "grok"`) replaces the
 STT, LLM, and TTS stages with one speech-to-speech WebSocket. Its turn gap is
@@ -29,7 +30,7 @@ fragmented conversations; barge-in cannot make a consistently late agent natural
 ## Definition
 
 Measure from the end of the callee's speech to the first frame of agent audio
-played to the gadget. Two clocks are useful:
+played to the SCO sink. Two clocks are useful:
 
 - **Caller clock.** `t0` is the last frame classified as speech by VAD. This is
   the strict view: it includes the 300–500 ms endpointing window.
@@ -38,6 +39,11 @@ played to the gadget. Two clocks are useful:
 
 The table below reproduces the brief's budget and starts at `t_endpoint`. The
 endpointing window is reported separately, not hidden inside STT.
+
+Bluetooth SCO carries the audio between the phone and the host. The link is mSBC at
+16 kHz or CVSD at 8 kHz, and the SCO scheduling and retransmission add delay, but this
+document does not assign a measured value to that stage. The cellular codec and network
+leg set a floor that the host cannot remove.
 
 ## Budget
 
@@ -66,7 +72,7 @@ number. State which clock was used.
 
 ## How to measure
 
-Use one monotonic clock on the Pi for all local stages. Wall-clock time and NTP
+Use one monotonic clock on the host for all local stages. Wall-clock time and NTP
 adjustments must not enter the per-turn measurement. Mark these instants:
 
 - `t_last_voiced`: last frame above the VAD threshold.
@@ -74,7 +80,7 @@ adjustments must not enter the per-turn measurement. Mark these instants:
 - `t_stt_final`: final transcript received.
 - `t_llm_first`: first content token received.
 - `t_tts_first_byte`: first audio byte or chunk received.
-- `t_first_frame`: first PCM frame written to the gadget.
+- `t_first_frame`: first PCM frame written to the SCO sink.
 
 Also record `t_barge_in` and `t_playback_stop` for interruption tests. Each turn
 gets a `call_id` and `turn_id`; each line is JSON. Do not log audio or full
@@ -131,6 +137,7 @@ tail that callers actually notice.
 | TCP and TLS setup | First turn much slower than later turns | Pre-warm at boot, keep-alive, TLS session reuse |
 | Wi-Fi power save | Periodic 100–300 ms spikes | Disable power save; accept higher idle power |
 | Large audio buffers | Smooth audio but sluggish replies | 20 ms frames; 40–80 ms playback buffer |
+| Bluetooth coexistence | Jitter or dropouts on the 2.4 GHz link | Keep the host and phone close, use a clean channel |
 | Distant provider region | Constant 200–250 ms penalty | Use an India endpoint |
 | Slow DNS | Occasional multi-second first connect | Cache, pre-resolve, avoid blocking the audio loop |
 
@@ -147,9 +154,9 @@ tail that callers actually notice.
   office connection.
 - Use 20 ms audio frames. Larger frames reduce syscall overhead but add latency.
 - Disable Wi-Fi power save: `sudo iw dev wlan0 set power_save off`. Verify with
-  `iw dev wlan0 get power_save`. The trade-off is higher idle power and heat; the
-  Pi is mains-powered, so latency wins for this application. Make the setting
-  persistent and re-check it after a reboot or driver update.
+  `iw dev wlan0 get power_save`. The trade-off is higher idle power; the host is
+  mains-powered, so latency wins for this application. Make the setting persistent
+  and re-check it after a reboot or driver update.
 - Set `TCP_NODELAY` on provider sockets. Avoid tiny writes that wait for Nagle.
 - Measure p95, not only p50, and segment by first turn versus later turns.
 
@@ -173,7 +180,7 @@ leaving an open line.
 
 ## Verification
 
-Run the same script 20 times on the target Pi, phone, Wi-Fi network, and provider
+Run the same script 20 times on the target host, phone, Wi-Fi network, and provider
 configuration. Fill in the measured column; do not copy expected values.
 
 | Metric | Expected | Measured | Notes |
@@ -189,15 +196,19 @@ configuration. Fill in the measured column; do not copy expected values.
 | Barge-in stop | < 100 ms | | Detection to silence |
 | First-turn penalty | < 300 ms | | Versus later turns |
 
-Record the date, provider, model, phone, and network with the results; a latency
-number without that context is not reproducible.
+Record the date, host, adapter, phone, codec, network, provider, and model with the
+results; a latency number without that context is not reproducible.
 
 ## Measurement limitations
 
+- No end-to-end latency measurement exists for this project yet, including the validated
+  Bluetooth run. The table above is a target, not a result.
 - Twenty calls is a small sample. It is enough to catch gross regressions, not to
   estimate a rare tail. Increase the sample for a release decision.
 - Cellular codec and network conditions vary by carrier and location. Measure on
   the SIM and network the agent will actually use.
+- Bluetooth codec negotiation varies. State whether a run used mSBC or CVSD; a CVSD run
+  is not comparable to an mSBC run.
 - Provider latency can change without notice. Re-run the check after a provider
   or model change, and keep a dated baseline.
 - These numbers measure the agent's response, not the callee's perception. A

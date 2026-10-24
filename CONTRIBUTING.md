@@ -28,7 +28,7 @@ By contributing, you agree that your contribution is licensed under the MIT Lice
 | `docs/decisions/` | Architecture decision records (ADRs) |
 | `agent/` | Python reference runtime and tests |
 | `android-helper/` | Kotlin reference helper app for placing and ending calls |
-| `scripts/` | USB gadget, installation, loopback, and dial scripts plus systemd units |
+| `scripts/` | Bluetooth setup, check, audio-test, dial, and Android helper scripts plus systemd user units |
 | `config/` | Example configuration with placeholders only |
 | `.github/` | Issue templates, pull request template, and CI workflows |
 
@@ -40,7 +40,7 @@ layout. Some paths are placeholders until the corresponding milestone lands.
 1. Open an issue first for anything larger than a typo or a broken link. Use the bug
    report or feature request form.
 2. Fork the repository and create a branch from `main`. Use a short descriptive name,
-   for example `docs/power-thermal-clarify` or `fix/gadget-rearm`.
+   for example `docs/operations-clarify` or `fix/sco-reconnect`.
 3. Keep the change focused. One topic per pull request makes review and rollback easier.
 4. Update documentation in the same pull request as the behavior change. If the change
    alters a hardware assumption, update the design brief first.
@@ -77,8 +77,8 @@ issue in the body when one exists.
 - [ ] `markdownlint-cli2` passes for changed Markdown.
 - [ ] `shellcheck` passes for changed shell scripts.
 - [ ] Python tests pass on Python 3.11, and new behavior has a test where practical.
-- [ ] Hardware claims are hedged as "verify on your device" unless the USB or Android
-      specification enforces the behavior.
+- [ ] Hardware claims are hedged as "verify on your device" unless the Android or
+      Bluetooth specification enforces the behavior.
 - [ ] `CHANGELOG.md` has an entry under `Unreleased` for user-visible changes.
 
 ## Documentation style
@@ -103,20 +103,25 @@ issue in the body when one exists.
 
 ## Hardware testing notes
 
-Hardware behavior varies across vendors, Android builds, and USB hubs. A report is only
-useful if it identifies the setup:
+Hardware behavior varies across vendors, Android builds, Bluetooth adapters, and Linux
+distributions. A report is only useful if it identifies the setup:
 
 - Phone model and region, Android version, One UI or vendor build number.
-- Raspberry Pi model, Raspberry Pi OS image and kernel version.
-- USB-C hub model and charger, and whether the Pi is bus-powered or on its PWR port.
+- Linux distribution and version, kernel, BlueZ, PipeWire, and WirePlumber versions.
+- Bluetooth adapter model, whether it is onboard or USB, and the negotiated codec
+  (mSBC or CVSD).
+- RSSI and whether the phone was paired, trusted, and set to **Calls and audio**.
 - SIM slot used for the call, whether VoLTE is enabled, and the mobile network operator.
-- Whether the USB gadget enumerated, and the output of `lsusb`, `aplay -l`, and
-  `arecord -l` where relevant.
-- Which stage failed: enumeration, routing, loopback, dial, media, or hangup.
+- Whether the SCO source and sink appeared, and the output of `bluetoothctl info`,
+  `pw-dump`, and `scripts/bluetooth-check.sh` where relevant.
+- Which stage failed: pairing, HFP link, SCO audio, helper, dial, media, inbound answer,
+  or hangup.
 
-Redact phone numbers, IMEI and SIM identifiers, tokens, and Wi-Fi credentials from logs
-before attaching them. State clearly whether you verified a behavior yourself or are
-reporting what a vendor documents.
+For helper or inbound failures, include the helper log (with numbers and tokens removed)
+and the relevant output of
+`journalctl --user -u telephone-agent-inbound.service`. Redact phone numbers, IMEI and SIM
+identifiers, tokens, and Wi-Fi credentials from logs before attaching them. State clearly
+whether you verified a behavior yourself or are reporting what a vendor documents.
 
 ## Reporting security issues
 

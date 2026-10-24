@@ -1,8 +1,13 @@
 # ADR 0003: Run on a Raspberry Pi Zero 2 W
 
-- Status: Accepted
+- Status: Superseded by [ADR 0009](./0009-bluetooth-only-linux-host.md)
 - Date: 2026-10-24
+- Superseded: 2026-10-24
 - Deciders: Project owner
+
+> **Status: Superseded by ADR 0009 (2026-10-24).** The Raspberry Pi and USB audio gadget
+> route was removed. This record is retained for history; do not use it as current setup
+> guidance.
 
 ## Context
 
@@ -108,6 +113,6 @@ go to the local speaker, not to a remote party. Neither is a better fit for this
 
 - [Design brief](../design-brief.md), sections 5 and 6.
 - [Architecture](../architecture.md), sections 5 and 11.
-- [Raspberry Pi setup](../raspberry-pi-setup.md).
-- [Power and thermal](../power-and-thermal.md).
+- The Raspberry Pi setup and power-and-thermal guides were removed; see
+  [ADR 0009: Bluetooth-only Linux host](./0009-bluetooth-only-linux-host.md).
 - [ADR 0002: PD hub power topology](./0002-power-phone-and-gadget-through-pd-hub.md).

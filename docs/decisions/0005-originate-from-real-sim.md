@@ -19,12 +19,12 @@ mobile number to an ordinary phone, so the caller-ID mismatch is material.
 
 A real SIM in Phone A provides a genuine mobile number. The callee answers on any
 phone, with no app and no data connection. The costs move to hardware and operations:
-a spare phone, a Pi, a hub, a charger, a UPS, and a SIM plan. The design supports one
-call at a time per phone and Pi pair, which is acceptable for a personal agent.
+a spare phone, a Linux host, a charger, and a SIM plan. The design supports one
+call at a time per phone and host pair, which is acceptable for a personal agent.
 
 ## Decision
 
-The canonical system originates calls from SIM A in Phone A. The Pi asks a helper app
+The reference system originates calls from SIM A in Phone A. The Linux host asks a helper app
 on the phone to place the call through `TelecomManager.placeCall()` with the agent
 SIM's phone account handle. The call leg is a genuine cellular call over the PSTN. No
 SIP trunk, cloud telephony number, or GSM gateway is part of the primary path.
@@ -49,7 +49,7 @@ rules on AI-generated voices in the United States.
 ### Negative
 
 - One phone and one SIM support one call at a time.
-- The build needs a spare Android phone, a Pi, a hub, a charger, and a UPS.
+- The build needs a spare Android phone, a Linux host, a charger, and a SIM plan.
 - Phone A must be maintained: updates, battery health, reboots, and SIM credit.
 - Cellular coverage and carrier VoLTE behavior become part of the reliability model.
 - Call charges and SIM plan limits apply, even if they are modest.
@@ -99,7 +99,7 @@ of reaching an ordinary phone number. It was rejected for the primary path.
 
 A landline gives a real number and reliable voice, but adds a subscription, a location
 constraint, and an analog adapter; it does not travel with the owner. It was rejected
-for the canonical build.
+for the reference build.
 
 ## References
 

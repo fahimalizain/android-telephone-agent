@@ -26,8 +26,8 @@ body:
       label: Steps to reproduce
       description: List the smallest sequence that reliably reproduces the problem.
       placeholder: |
-        1. Flash Raspberry Pi OS Lite 64-bit and boot the Pi.
-        2. Run scripts/uac-gadget.sh and connect the phone.
+        1. Pair Phone A with the Linux host and enable Calls and audio.
+        2. Place a call and run scripts/bluetooth-check.sh.
         3. ...
     validations:
       required: true
@@ -35,8 +35,8 @@ body:
     id: recent-changes
     attributes:
       label: What changed recently
-      description: List anything that changed before the problem appeared, such as an OS update, a different hub, or a configuration edit.
-      placeholder: Updated Raspberry Pi OS, replaced the USB-C hub, rotated the helper token
+      description: List anything that changed before the problem appeared, such as an OS update, a different Bluetooth adapter, or a configuration edit.
+      placeholder: Updated BlueZ or PipeWire, changed the Bluetooth adapter, rotated the helper token
   - type: textarea
     id: expected
     attributes:
@@ -58,12 +58,12 @@ body:
       description: Choose the part of the project closest to the problem.
       options:
         - Documentation
-        - USB gadget and audio routing
+        - Bluetooth HFP link or SCO audio
         - Android setup or helper app
         - Dialing and call control
+        - Inbound answering
         - Voice agent runtime
         - Scripts and systemd
-        - Power, thermal, or hardware
         - Other
     validations:
       required: true
@@ -71,14 +71,14 @@ body:
     id: hardware
     attributes:
       label: Hardware
-      description: Phone model and region, Pi model, hub, charger, and UPS.
-      placeholder: Samsung Galaxy A23 4G (SM-A235F), Raspberry Pi Zero 2 W, generic PD hub
+      description: Phone model and region, Linux host, Bluetooth adapter, and charger.
+      placeholder: Samsung Galaxy A23 4G (SM-A235F), Ubuntu laptop, onboard Bluetooth
   - type: input
     id: software
     attributes:
       label: Software and OS
-      description: Android version and vendor build, Raspberry Pi OS image, kernel, and the commit or release you tested.
-      placeholder: Android 14 / One UI 6.x, Raspberry Pi OS Lite 64-bit Bookworm, commit abc1234
+      description: Android version and vendor build, Linux distribution, kernel, BlueZ, PipeWire, WirePlumber, and the commit or release you tested.
+      placeholder: Android 14 / One UI 6.x, Ubuntu 24.04, BlueZ 5.85, PipeWire 1.6.2, commit abc1234
     validations:
       required: true
   - type: textarea
@@ -88,9 +88,9 @@ body:
       description: Paste only the relevant excerpt. Remove identifiers and credentials.
       render: shell
       placeholder: |
-        $ dmesg | tail -20
-        $ aplay -l
-        $ arecord -l
+        $ bluetoothctl info AA:BB:CC:DD:EE:FF
+        $ ./scripts/bluetooth-check.sh AA:BB:CC:DD:EE:FF
+        $ journalctl --user -u telephone-agent-bluetooth.service -n 100
   - type: checkboxes
     id: checks
     attributes:

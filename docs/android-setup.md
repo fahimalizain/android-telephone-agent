@@ -6,12 +6,13 @@ Applies to: Samsung Galaxy A23 4G (SM-A235F), One UI, Android 13-15
 ## Purpose
 
 This guide turns a spare Galaxy A23 4G into the agent's phone: a charged, locked-down
-device that places calls on command and routes their audio to a USB-C headset. It covers
-the Phase 0 hardware check, the settings that keep the phone alive and charging, wireless
-debugging for provisioning, helper installation, and audio-routing verification.
+device that places calls on command, answers calls when the inbound mode is enabled, and
+routes their audio to a Linux host over Bluetooth HFP. It covers Bluetooth pairing and
+routing checks, the settings that keep the phone alive and charging, adb over Wi-Fi for
+provisioning, helper installation, and audio-route verification.
 
-It does not cover the Raspberry Pi, the USB audio gadget, or the agent runtime. Those are
-in `docs/raspberry-pi-setup.md` and `docs/voice-agent.md`.
+It does not cover the Linux host or the agent runtime. Those are in
+[Bluetooth HFP](bluetooth-hfp.md) and [Voice agent](voice-agent.md).
 
 ## Prerequisites
 
@@ -19,58 +20,66 @@ in `docs/raspberry-pi-setup.md` and `docs/voice-agent.md`.
 |---|---|
 | Phone | Samsung Galaxy A23 4G, model SM-A235F, One UI, agent SIM active |
 | SIM | A voice-capable SIM with credit and a known number; SMS not required |
-| Charger | Samsung 25 W USB-C PD charger |
-| Hub | USB-C hub with PD passthrough and at least one USB data port |
-| Headset | USB-C earphones with a microphone (USB audio class), for Phase 0 |
+| Charger | Samsung 25 W USB-C PD charger, or another suitable charger |
+| Host | Linux with BlueZ, PipeWire, and WirePlumber in the user session |
+| Bluetooth | A working adapter on the host; onboard Bluetooth is sufficient |
 | Test phone | A second phone you can call and answer |
-| Computer | macOS, Linux, or Windows with `adb` 30 or newer |
-| Network | Phone and computer on the same private LAN, with client isolation off |
+| Computer | A workstation with `adb` 30 or newer for provisioning |
+| Network | Phone and host on the same private LAN, with client isolation off |
 
-Do not start with the Pi connected. Phase 0 validates the phone, hub, charger, and
-headset path first. If it fails, the rest of the build cannot work.
+The phone's USB port is free because Bluetooth is the audio link. It is used for charging;
+a USB cable can also be used for adb during bench provisioning, but the production control
+path is the helper's LAN endpoint.
 
-## Phase 0: audio routing and charging
+## Phase 0: Bluetooth HFP routing and charging
 
-Android routes call audio to a USB audio device only when the device enumerates as a USB
-headset and USB audio routing is enabled. The Pi will later present itself as exactly
-such a headset through the hub. Phase 0 proves that this phone and this hub will do it
-with a known-good headset.
+Android routes call audio to a Bluetooth device when that device is paired, trusted, and
+enabled for calls. The Linux host presents itself as an HFP hands-free unit (HF) and Phone
+A is the audio gateway (AG). Phase 0 proves that this phone and this host route call audio
+in both directions.
 
 1. Insert the agent SIM and complete any carrier provisioning.
 2. Disable the SIM PIN (Settings → Security and privacy → More security settings → SIM
    card lock), or accept that a reboot will leave the SIM locked until you unlock it.
 3. Charge the phone above 50 percent.
-4. Connect the charger to the hub's PD input, the hub to the phone's USB-C port, and the
-   USB-C headset to a data port on the hub. Use the exact hub and charger you plan to
-   deploy.
-5. Confirm the phone reports charging. On the lock screen, the battery line should say
-   charging; Settings → Battery and device care → Battery shows the same.
-6. Confirm a USB audio notification appears. One UI may label it "USB audio connected",
-   "USB audio device connected", or similar; labels vary by version.
-7. Call the test phone and answer it. Speak into the headset microphone and confirm the
-   far end hears you. Listen and confirm the far end is in the headset, not the phone
-   earpiece or speaker.
-8. Keep the call open for two to three minutes. Confirm the battery percentage is not
-   falling, or check `adb shell dumpsys battery` after wireless debugging is enabled. The
-   phone must charge while the headset is in use.
-9. Move the phone and cable gently, then repeat. A loose hub connection can re-enumerate
-   the audio device mid-call and drop the route.
+4. On the host, install the WirePlumber fragment and restart the user service as described
+   in [Bluetooth HFP](bluetooth-hfp.md) sections 3 and 4.
+5. Pair Phone A with the host, trust the host, and enable **Calls and audio** for it. See
+   [Bluetooth HFP](bluetooth-hfp.md) section 5.
+6. Place a test call from Phone A to the test phone and answer it. Confirm that the call
+   screen shows the Bluetooth route, not the earpiece or speaker.
+7. On the host, run the check and audio test during the call:
 
-Pass criteria: two-way call audio through the headset, and charging continues for the
-duration of the call. Both must hold with the hub in the path.
+   ```bash
+   ./scripts/bluetooth-check.sh AA:BB:CC:DD:EE:FF
+   ./scripts/bluetooth-audio-test.sh list
+   ./scripts/bluetooth-audio-test.sh record 10 /tmp/bluetooth-downlink.wav
+   ./scripts/bluetooth-audio-test.sh tone 2
+   ```
+
+   Replace the address with Phone A's. The check must show both SCO nodes; `record` must
+   produce a non-empty WAV; the far end should hear the tone. See
+   [Bluetooth HFP](bluetooth-hfp.md) sections 7 and 8.
+8. Keep the call open for two to three minutes. Confirm the battery percentage is not
+   falling, or check `adb shell dumpsys battery` after adb is connected. The phone must
+   charge while Bluetooth carries the call.
+
+Pass criteria: two-way call audio over HFP SCO, and charging continues for the duration of
+the call. Both must hold before the helper is used for an unattended call.
 
 If it fails:
 
-- Audio in the phone earpiece: check Developer options → Disable USB audio routing is
-  OFF, try the headset directly in the phone, then try another hub.
-- No microphone audio: the headset may be output-only, or the hub may not pass the
-  microphone endpoint. Try a known headset with a microphone.
-- Charging stops when the headset is connected: the hub is not passing PD and data at the
-  same time, or its power budget is too small. Replace the hub.
-- Nothing enumerates: try another cable and hub port; not every USB-C port carries data.
+- Audio stays in the earpiece or speaker: confirm **Calls and audio** is enabled, reconnect
+  the phone, and check the route on the call screen.
+- No SCO nodes: confirm the WirePlumber fragment is loaded, the phone is connected, and
+  the call is active. SCO nodes do not exist while the phone is idle.
+- No microphone audio: check the SCO sink direction and repeat the tone test; the remote
+  party should hear the tone, not the host speaker.
+- The phone does not charge: try another charger and cable, inspect the port for lint, and
+  confirm the battery setting. Bluetooth does not use the USB data pins.
 
-Do not proceed to the Pi until Phase 0 passes. The Pi gadget can only be as reliable as
-this path.
+Do not proceed until Phase 0 passes. The host can only be as reliable as this Bluetooth
+link.
 
 ## Enable Developer options
 
@@ -84,10 +93,9 @@ icon in Settings and search for the setting name.
 
 ## Enable Wireless debugging
 
-The phone's USB-C port is the host port for the hub and the Pi. Android cannot be a USB
-host and a USB device on the same port at the same time, so a laptop cannot attach as a
-USB device while the hub is connected. Wireless debugging is the only adb path during
-normal operation.
+Wireless debugging is the convenient adb path for provisioning. It does not depend on the
+USB cable, which stays free for charging. A USB cable also works on the bench if you
+prefer it.
 
 1. Connect the phone and the computer to the same Wi-Fi network, not a guest network
    with client isolation.
@@ -141,7 +149,7 @@ vary by version and carrier. Verify the effect, not just the label.
 |---|---|---|---|
 | Protect battery | Settings → Battery and device care → Battery → Protect battery | ON (80-85%) | Reduces swelling during 24/7 charging |
 | Stay awake | Settings → Developer options → Stay awake | ON | Keeps the screen, Wi-Fi, and adb alive while charging |
-| USB audio routing | Settings → Developer options → Disable USB audio routing | OFF (default) | ON would force call audio to the phone speaker |
+| Bluetooth calls | Settings → Connections → Bluetooth → host gear icon | **Calls and audio** ON | Routes call audio to the host; without it the call stays on the earpiece |
 | Auto restart | Settings → General management → Reset → Auto restart | OFF | Avoids unattended reboots |
 | Play Store updates | Play Store → profile → Settings → Network preferences → Auto-update apps | Don't auto-update apps | Avoids surprise app changes |
 | Galaxy Store updates | Galaxy Store → Menu → Settings → Auto update apps | Turn off | Same |
@@ -166,17 +174,17 @@ Notes:
   unused apps to sleep, and Adaptive battery. Exclude the helper from all of them.
 - Lock screen: calls may be placed while locked; test this explicitly. Keeping a secure
   lock is preferable to disabling it, which is a last resort and exposes the device.
+- Confirm the phone reconnects to the host after a reboot. Pairing and trust help, but a
+  reconnect may still need a manual tap or `bluetoothctl connect`.
 
 ## Physical setup
 
 - Remove the case. The phone charges continuously and benefits from airflow.
 - Stand it upright in a ventilated spot, away from direct sun and soft surfaces.
-- Strain-relieve the USB-C cable: loop it once and anchor it so the connector carries no
+- Strain-relieve the charging cable: loop it once and anchor it so the connector carries no
   weight.
-- Do not bend the connector sideways. A worn USB-C port can re-enumerate the hub and drop
-  the audio route mid-call.
-- Keep the hub and charger off the floor and away from the phone's speaker and
-  microphone openings.
+- Keep the phone and host within Bluetooth range. A weak link (the validated run was about
+  -87 dBm) can drop during call setup.
 - Check the battery for swelling monthly. Stop using a swollen battery.
 
 ## Install the helper
@@ -206,7 +214,7 @@ permissions below, whitelists the package, starts the service, and can probe `/h
 The bearer token is injected at build time from the `dialHelperToken` Gradle property in
 `$GRADLE_USER_HOME/gradle.properties` (on this machine
 `/scratch/gradle/gradle.properties`; conventionally `~/.gradle/gradle.properties`), never
-from a file in the repository. Put the same token in the Pi's `[dialer] token` or
+from a file in the repository. Put the same token in the host's `[dialer] token` or
 `TELEPHONE_AGENT_DIALER__TOKEN`. If the property is absent, the APK still builds with a
 placeholder and `/call` and `/hangup` return `503`. A generated token already exists at
 `/scratch/android/dial-helper/token`; never print or commit its value.
@@ -230,9 +238,9 @@ adb shell pm grant dev.example.dialhelper android.permission.POST_NOTIFICATIONS
 `POST_NOTIFICATIONS` exists only on Android 13 and newer; skip that command on older
 builds. `READ_PHONE_STATE` is needed to enumerate phone accounts; Android 14 and newer
 gate `TelecomManager.getPhoneAccount()` behind `READ_PHONE_NUMBERS`, which is needed to
-read the SIM/account label. `ANSWER_PHONE_CALLS` is only for best-effort hangup. None of
-these permissions grants call audio or call recording. See `docs/dial-helper.md` for the
-full permission rationale.
+read the SIM/account label. `ANSWER_PHONE_CALLS` is only for best-effort hangup and
+inbound answering. None of these permissions grants call audio or call recording. See
+`docs/dial-helper.md` for the full permission rationale.
 
 Grant the battery exemption. The first command adds the package to the device-idle
 whitelist; the second opens the system confirmation dialog for the same setting:
@@ -292,30 +300,28 @@ Do not treat the boot path as reliable on this build until you have tested it.
 
 ## Verify audio routing during a call
 
-Place a call through the helper, answer it on the test phone, and inspect the audio
-state while the call is active:
+Place a call through the helper, answer it on the test phone, and inspect the audio state
+while the call is active:
 
 ```sh
-adb shell dumpsys audio | grep -i usb
-adb shell dumpsys audio | grep -i -E "communication|usb"
-adb shell dumpsys usb | grep -i -E "audio|headset"
+adb shell dumpsys audio | grep -i -E "communication|bluetooth"
+adb shell dumpsys bluetooth_manager | grep -i -E "hfp|headset|sco"
 ```
 
-The exact output varies by One UI build. Look for a USB audio device in the device list
-and for a communication route that uses it. A line mentioning `USB` in the communication
-strategy is the signal you want. If only the phone earpiece or speaker appears, the route
-did not switch.
+The exact output varies by One UI build. Look for a communication route that uses
+Bluetooth and for an HFP/headset entry for the host. If only the earpiece or speaker
+appears, the route did not switch. Confirm the phone's Bluetooth details show **Calls and
+audio**, and run the host-side check from [Bluetooth HFP](bluetooth-hfp.md) section 7.
 
-Also check the phone's notification shade for the USB audio notification, and check
-charging:
+Also check charging:
 
 ```sh
 adb shell dumpsys battery | grep -E "status|powered|level"
 ```
 
-`status: 2` means charging and `USB powered: true` confirms power. At the Protect battery
-ceiling the phone may stop charging by design; USB power should still be present. Confirm
-the far end still hears the headset microphone and you hear the far end in the headset.
+`status: 2` means charging. At the Protect battery ceiling the phone may stop charging by
+design; the charger should still be connected. Confirm the far end hears the SCO uplink
+and the host records the downlink.
 
 ## Known quirks
 
@@ -339,22 +345,22 @@ adb shell dumpsys deviceidle whitelist | grep dialhelper
 ```
 
 Locking the app in the recent-apps view may help on some builds; verify on your device.
-The Pi should alert when `/health` stops responding.
+The host should alert when `/health` stops responding.
 
-### USB port orientation and wear
+### Bluetooth disconnects
 
-USB-C is reversible, but the port and cable are not indestructible. A worn port, lint, or
-side load can cause re-enumeration. When the gadget disappears, call audio may fall back
-to the phone's earpiece or speaker. Clean the port with a non-metallic tool, use a short
-strain-relieved cable, and check `dumpsys usb` after moving the phone.
+Bluetooth can drop during call setup on a weak link, especially at the start of the first
+call after a reboot. The phone may remain paired but disconnected. Check
+`bluetoothctl info <address>` on the host and reconnect with
+`bluetoothctl connect <address>`; confirm **Calls and audio** is still enabled. The
+validated run at about -87 dBm needed one manual reconnect after the first call dropped.
 
-### Charging negotiation
+### Charging
 
-The hub must pass data and charger power at the same time. Some hubs pass only USB 2.0
-data and a limited charge, or fail to negotiate the phone's fastest charging mode. The
-phone may charge slowly or not at all during a call. Check `dumpsys battery` and the
-battery screen, and keep the phone below the Protect battery ceiling. A 25 W charger does
-not guarantee 25 W through an arbitrary hub; verify on your device.
+The phone charges from its own USB-C charger, independent of the audio link. If charging
+is slow or absent, try another cable and charger, clean the port with a non-metallic tool,
+and confirm the battery setting. A 25 W charger only helps if the cable and port support
+it.
 
 ### Wireless debugging is not durable
 
@@ -371,14 +377,14 @@ off. The helper's LAN endpoint is the production path.
 - Keep the APK and its token private; the token is embedded in the APK and can be
   extracted.
 - Turn off Wireless debugging after provisioning. Paired adb keys are powerful.
-- Keep the screen lock enabled and test locked-screen dialing; treat physical access to
-  the USB port as access to the gadget and charging path.
+- Keep the screen lock enabled and test locked-screen dialing and answering; treat physical
+  access to the phone as access to the SIM and the helper token.
 
 ## Verification checklist
 
-- Phase 0 passes, and a helper-placed call shows USB audio in `dumpsys audio`; the far
-  end hears the headset microphone and the phone charges during the call.
-- Developer options shows Stay awake ON and Disable USB audio routing OFF.
+- Phase 0 passes: a call routes over Bluetooth HFP, both SCO nodes exist, the far end hears
+  the tone, and the phone charges during the call.
+- **Calls and audio** is enabled for the host, and the phone reconnects after a reboot.
 - Protect battery is ON; auto restart, Play Store auto-update, Galaxy Store auto-update,
   and software update auto-download are OFF.
 - SIM manager uses the agent SIM for calls; VoLTE is ON if the carrier supports it.
@@ -398,9 +404,9 @@ off. The helper's LAN endpoint is the production path.
   development path, not an unattended control channel.
 - Samsung battery management can still stop the helper after an update or under memory
   pressure.
-- USB audio routing, hub PD behavior, and charging speed are device- and hub-specific.
-  Verify on your device; do not assume a spec sheet applies.
-- The A23's USB-C port is the only data port. There is no separate debug port, and the
-  phone cannot be a USB host and a USB device simultaneously.
+- Bluetooth routing and codec negotiation are device-specific. The link may fall back to
+  CVSD at 8 kHz instead of mSBC at 16 kHz. Verify on your device.
+- The A23's onboard Bluetooth is controlled by the phone; the host cannot force a
+  reconnect if the phone refuses or the adapter is reset.
 - Protect battery reduces runtime on battery. During a power cut the phone has less
-  capacity than a full charge would provide.
+  capacity than a full charge would provide, and the host may be offline.

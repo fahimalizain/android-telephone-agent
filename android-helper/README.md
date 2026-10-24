@@ -13,9 +13,9 @@ files to paste into a new project.
 
 `DialService.kt` is a foreground Android service that listens on `0.0.0.0:8765`, places
 a call when it receives an authenticated `POST /call`, reports cellular call state on
-`GET /state`, and answers a ringing call on `POST /answer`. It exists because Phone A
-is the USB host for the Pi's audio gadget, so adb over USB is unavailable during normal
-operation.
+`GET /state`, and answers a ringing call on `POST /answer`. It exists because call control and audio
+are separate: the helper owns dialing, answering, and hangup over the LAN, while
+Bluetooth HFP carries the call audio.
 
 It provides:
 
@@ -31,20 +31,20 @@ Before refusing a call or reporting a failed hangup, the helper checks
 party ended the call, instead of requiring a service restart. The same check blocks a
 `/call` while an inbound call is ringing or active.
 
-It does not touch call audio. Audio is carried separately by the Pi's USB Audio Class
-gadget or by Bluetooth HFP through PipeWire. The helper is the call-state and signaling
-path; Bluetooth/PipeWire carries audio only, and HFP SCO nodes appear after a call is
-answered, not while it is ringing.
+It does not touch call audio. Audio is carried separately by Bluetooth HFP through
+PipeWire. The helper is the call-state and signaling path; Bluetooth/PipeWire carries
+audio only, and HFP SCO nodes appear after a call is answered, not while it is ringing.
 
 ## Status
 
 The project builds and produces an installable APK. It has been smoke-tested on an
 Android 36 emulator: service startup, `/health`, bearer authentication, input validation,
-the call window, hangup responses, and the signed release APK. The `/state` and `/answer`
-paths compile and are covered by the build, but they have not been exercised against a
-real inbound cellular call or a physical phone. Treat permission prompts, real SIM-label
-routing, boot startup, actual hangup, answering from a locked screen, and vendor battery
-management as unverified until you test them on your device.
+the call window, hangup responses, and the signed release APK. Outbound calls have also
+been exercised with a physical Galaxy A23 over Bluetooth HFP through the LAN helper. The
+`/state` and `/answer` paths compile and are covered by the build, but no live inbound
+PSTN call has been validated. Treat permission prompts, real SIM-label routing, boot
+startup, actual hangup, answering from a locked screen, and vendor battery management as
+unverified until you test them on your device.
 
 ## Project layout
 
@@ -197,14 +197,14 @@ placeholder `REPLACE_WITH_32_BYTE_RANDOM_TOKEN`, and the service answers `POST /
 `503 {"error":"token not configured"}`. `GET /health` still works, so you can use it to
 confirm the service is up before fixing the build.
 
-The Pi needs the same token in `[dialer] token` in `config/config.toml`, or in the
+The host needs the same token in `[dialer] token` in `config/config.toml`, or in the
 `TELEPHONE_AGENT_DIALER__TOKEN` environment variable. Never commit the real
 `config/config.toml`.
 
 A `BuildConfig` field is compiled into the APK and is extractable from it. Keeping the
 value in the Gradle user home only keeps it out of version control; it does not make the
 token secret from anyone who has the APK. Treat the APK as a secret and rotate the token
-by rebuilding, reinstalling, updating the Pi, and restarting the agent.
+by rebuilding, reinstalling, updating the host environment, and restarting the agent.
 
 ## Configure the SIM label (optional)
 
@@ -344,13 +344,13 @@ request. All responses are JSON.
 | `POST` | `/call` | `Authorization: Bearer <token>` | `{"number":"+919876543210"}` |
 | `POST` | `/hangup` | `Authorization: Bearer <token>` | None |
 
-Numbers must match `^\+[1-9][0-9]{6,14}$` and be normalized on the Pi. `202` on `/call`
+Numbers must match `^\+[1-9][0-9]{6,14}$` and be normalized on the host. `202` on `/call`
 means Telecom accepted the request, not that the call connected. A `/call` while
 `TelecomManager.isInCall()` reports any ringing or active call returns `409`; that includes
 an inbound call this helper did not place. Inside the ten-minute active window, a `409`
 also applies when the call state cannot be read, but if Telecom reports no call the stale
 window is cleared and the helper dials. A wrong or missing token returns `401`; a missing
-`CALL_PHONE` permission returns `403` (not retried by the Pi client).
+`CALL_PHONE` permission returns `403` (not retried by the host client).
 
 `GET /state` returns `{"state":"idle"}`, `{"state":"ringing"}`, `{"state":"offhook"}`, or
 `{"state":"unknown"}`. It uses `TelephonyManager.callState` and falls back to
@@ -417,7 +417,7 @@ destination number, or the token.
 | Symptom | Likely cause |
 |---|---|
 | `503 token not configured` | `dialHelperToken` was missing or blank at build time; set it in the Gradle user home, rebuild, reinstall |
-| `401 unauthorized` | Token mismatch; rebuild after changing `dialHelperToken`, and update the Pi to the same value |
+| `401 unauthorized` | Token mismatch; rebuild after changing `dialHelperToken`, and update the host to the same value |
 | Gradle fails with an unsupported Java version | `JAVA_HOME` is not JDK 21; export the JDK 21 path before running `./gradlew` |
 | SDK location not found | `ANDROID_HOME` or `local.properties` is wrong; install platform 36 and build-tools 36.1.0 |
 | `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | The APK is signed with a different key (debug vs release); uninstall the old package first |

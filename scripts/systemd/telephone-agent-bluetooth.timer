@@ -5,8 +5,8 @@ Description=Daily Bluetooth HFP telephone agent call
 # Call time in the local system time zone. Edit this for your schedule.
 OnCalendar=*-*-* 09:00:00 Asia/Kolkata
 AccuracySec=1s
-# Match the USB timer and operations policy: do not catch up on missed slots
-# after a reboot or power cut. A late call is worse than a skipped one.
+# Match the operations policy: do not catch up on missed slots after a reboot
+# or power cut. A late call is worse than a skipped one.
 Persistent=false
 Unit=telephone-agent-bluetooth.service
 

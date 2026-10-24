@@ -1,8 +1,13 @@
 # ADR 0001: Use a USB Audio Class gadget instead of root
 
-- Status: Accepted
+- Status: Superseded by [ADR 0009](./0009-bluetooth-only-linux-host.md)
 - Date: 2026-10-24
+- Superseded: 2026-10-24
 - Deciders: Project owner
+
+> **Status: Superseded by ADR 0009 (2026-10-24).** The Raspberry Pi and USB audio gadget
+> route was removed. This record is retained for history; do not use it as current setup
+> guidance.
 
 ## Context
 
@@ -101,7 +106,7 @@ but is sensitive to levels, echo, and room noise, and remains rejected.
 
 - [Design brief](../design-brief.md), sections 3 and 7.
 - [Architecture](../architecture.md), sections 3 and 4.
-- [Raspberry Pi setup](../raspberry-pi-setup.md).
-- [`uac-gadget.sh`](../../scripts/uac-gadget.sh).
+- The Raspberry Pi setup guide and `uac-gadget.sh` were removed; see
+  [ADR 0009: Bluetooth-only Linux host](./0009-bluetooth-only-linux-host.md).
 - [ADR 0002: PD hub power topology](./0002-power-phone-and-gadget-through-pd-hub.md).
 - [Glossary](../glossary.md).

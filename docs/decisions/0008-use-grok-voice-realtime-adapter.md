@@ -32,7 +32,7 @@ Add the realtime session beside the existing pipeline as an independent adapter,
 `Transcriber`, or `Synthesizer`.
 
 The adapter streams the call downlink as binary PCM16 at `audio.sample_rate`,
-plays the returned PCM through a streaming ALSA or PipeWire sink, stops playback
+plays the returned PCM through a streaming PipeWire sink, stops playback
 on `input_audio_buffer.speech_started`, and exposes `end_call` and, on delegated
 calls, `consult` as function tools. The API key comes from `XAI_API_KEY` or a
 `TELEPHONE_AGENT_REALTIME__API_KEY` override; the optional TOML field exists for

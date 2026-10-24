@@ -1,25 +1,25 @@
 # Dial Helper
 
 Status: reference implementation, not production-hardened. Buildable APK with Android 36
-emulator smoke tests; physical-phone, inbound-call, and USB-audio validation pending.
+emulator smoke tests; outbound calls validated with a physical Galaxy A23 over Bluetooth;
+live inbound-call validation pending.
 Applies to the Samsung Galaxy A23 4G (SM-A235F), One UI, Android 13-15.
 
 ## Purpose
 
-Phone A is the USB host for the Pi Zero 2 W: its only USB-C port is occupied by the hub
-and audio gadget, and adb over USB is unavailable. The helper is a small LAN service
-that places calls on request and exposes the cellular call state so the agent can notice
-and answer an inbound call. Audio travels over the USB gadget or the Bluetooth HFP link
-(through PipeWire), not through this app.
+Phone A runs the helper; the Linux host runs the voice agent. The helper is a small LAN
+service that places calls on request and exposes the cellular call state so the agent can
+notice and answer an inbound call. Audio travels over the Bluetooth HFP link through
+PipeWire, not through this app.
 
 The helper is the call-state and signaling path only. Bluetooth/PipeWire carries audio
 only: the HFP SCO nodes appear after the call is answered, not while it is ringing, and
 the helper never touches media. Placing or answering a call changes cellular and HFP
 state; it does not by itself open an audio stream.
 
-Prerequisites: Phone A is provisioned per `docs/android-setup.md`; phone and Pi share a
+Prerequisites: Phone A is provisioned per `docs/android-setup.md`; phone and host share a
 private LAN without client isolation; the APK is installed with runtime permissions;
-the service is running; the Pi holds the token compiled into the APK.
+the service is running; the host holds the token compiled into the APK.
 
 ## API contract
 
@@ -131,7 +131,7 @@ HTTP/1.1 202 Accepted
 ```
 
 `202` means Telecom accepted the request, not that the call connected; the helper does
-not wait for setup. Numbers must match `^\+[1-9]\d{6,14}$` and be normalized on the Pi.
+not wait for setup. Numbers must match `^\+[1-9]\d{6,14}$` and be normalized on the host.
 
 A `/call` is refused with `409 {"error":"call already active"}` whenever
 `TelecomManager.isInCall()` reports a ringing or active call, including an inbound call
@@ -190,7 +190,7 @@ and `/answer`; neither returns a phone number.
 - Never log the token, the body, or the destination number.
 - The token is compiled into the APK and is extractable. Treat the APK as a secret.
 - Rotation is manual with no overlap window: change `dialHelperToken` in the Gradle user
-  home, rebuild, reinstall, update the Pi, and restart the service.
+  home, rebuild, reinstall, update the host environment, and restart the service.
 
 ## Android permissions
 
@@ -294,8 +294,7 @@ reports only the call phase.
 Bluetooth/PipeWire carries audio only. After the call is answered, the phone routes the
 cellular audio to the connected HFP hands-free unit and PipeWire exposes the SCO
 source/sink. The helper does not create those nodes and cannot make audio appear before
-the call is answered. On the USB-gadget path, the audio device is likewise independent
-of the helper.
+the call is answered.
 
 If the agent needs the call to end, `POST /hangup` works for an answered inbound call
 because `/answer` records the call in the same window used for outbound calls. A missed
@@ -323,7 +322,7 @@ than ten minutes can still be ended. A `/call` inside the window is likewise all
 service. Outside the window, `/call` still refuses to place while `isInCall()` reports a
 ringing or active call. The fallback for a call the helper cannot observe is for the
 agent to finish and the remote party to hang up, with a hard maximum duration enforced by
-the Pi; the cellular leg may stay up and billed until then.
+the host; the cellular leg may stay up and billed until then.
 
 ## Reliability
 
@@ -336,7 +335,7 @@ the Pi; the cellular leg may stay up and billed until then.
   return `409` (or place a duplicate after a service restart). Do not retry `/call`
   blindly; use one stable key per call once the helper supports deduplication. Do not
   retry a `202`; the active-call timestamp is not idempotent across a restart. One
-  scheduled call per slot is enforced on the Pi.
+  scheduled call per slot is enforced on the host.
 - Log through logcat tag `DialHelper`: start/stop, listen address, account label, outcome,
   failures. Never log numbers, bodies, or tokens.
 - Do not hold a coroutine open for the call; placing or answering a call is a short IPC
@@ -354,7 +353,7 @@ premium-rate numbers, and can answer a ringing call. The token is the only autho
 check.
 
 - Keep the endpoint on the LAN. Do not port-forward, enable UPnP for it, or use a DMZ.
-- The reference accepts any E.164 number. Enforce a destination allowlist on the Pi, or
+- The reference accepts any E.164 number. Enforce a destination allowlist on the host, or
   add one here before deployment.
 - `/state` and `/answer` reveal and act on the cellular call phase but never expose a
   caller's number. An attacker with the token can still observe that a call is ringing
@@ -418,7 +417,7 @@ curl -i -sS -X POST "http://$PHONE_IP:8765/call" \
 # HTTP/1.1 401 Unauthorized / {"error":"unauthorized"}
 ```
 
-Run these from the Pi; the phone has no curl binary by default. Watch
+Run these from the host; the phone has no curl binary by default. Watch
 `adb logcat -s DialHelper` while testing. The log may contain `inbound call answered`,
 but never the caller or a number.
 

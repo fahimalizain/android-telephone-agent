@@ -11,7 +11,8 @@ Both share one `CallService`, one FIFO queue, and one active call.
 Prerequisites:
 
 - The optional server dependencies: `pip install -e ".[server]"` from `agent/`.
-- A working audio backend and a reachable dial helper. Without them, `serve` starts
+- A working Bluetooth HFP audio path with BlueZ, PipeWire, and WirePlumber in the
+  agent's user session, plus a reachable dial helper. Without them, `serve` starts
   and accepts requests, but a call fails when the session tries to dial or open audio.
 - A bearer token in `[server].token` (or `TELEPHONE_AGENT_SERVER__TOKEN`). `serve`
   refuses to start without one.
@@ -40,7 +41,9 @@ Prerequisites:
 - **No A2A timeout update.** If a consultation times out while an A2A task is
   `TASK_STATE_INPUT_REQUIRED`, the task stays in that state until the requester sends
   another message. See [A2A consultation timeout](#a2a-consultation-timeout).
-- **No inbound PSTN calls, barge-in, or raw audio over either protocol.**
+- **No raw audio over either protocol.** The opt-in inbound watcher is a separate runtime
+  mode; it is not controlled through MCP or A2A. The default text pipeline has no
+  barge-in.
 
 Until allowlists, budgets, requester identity, and rate limits exist, keep the
 listeners on loopback or a trusted network. Do not port-forward them.
@@ -53,7 +56,7 @@ flowchart LR
     LLM["LLM host<br/>MCP client"]
     AGT["Requester agent<br/>A2A client"]
   end
-  subgraph RT["Agent runtime on the Pi"]
+  subgraph RT["Agent runtime on the Linux host"]
     MCP["MCP server<br/>Streamable HTTP<br/>:8765/mcp"]
     A2A["A2A server<br/>JSON-RPC over HTTP<br/>:8766/a2a"]
     SVC["CallService<br/>FIFO queue, one active call<br/>in-memory tasks, optional JSONL audit"]
@@ -272,10 +275,9 @@ The card advertises protocol 1.0. `a2a-sdk` 1.2.3, the version tested here, disp
 the protocol 1.0 method names. Send `A2A-Version: 1.0`; the SDK treats a missing header
 as 0.3 and rejects the request.
 
-Before relying on the examples below, read
-[Known issue with a2a-sdk 1.2.3](#known-issue-with-a2a-sdk-123). With the installed
-version, a new task currently fails before the SDK stores a `Task`; discovery and
-authentication are unaffected.
+Before relying on the examples below, note the known issue with `a2a-sdk` 1.2.3: with
+the installed version, a new task currently fails before the SDK stores a `Task`;
+discovery and authentication are unaffected.
 
 | Method | Purpose |
 |---|---|
@@ -669,8 +671,10 @@ cannot be confirmed marks the task `failed` with reason `hangup_failed`.
 - **In-memory tasks.** Tasks and A2A task state do not survive a restart. The audit log
   is for audit, not recovery, and the final record omits the objective and full
   transcript.
-- **No inbound PSTN.** A person calling the agent's SIM is not answered by the agent.
-  Inbound control-plane tasking is the only inbound direction.
+- **Inbound is separate.** The opt-in inbound watcher answers calls to the agent SIM and
+  runs a Grok Voice session. It is implemented but has not been live-validated on a PSTN
+  call, and it is not controlled over MCP or A2A. Inbound and outbound calls share the
+  one call slot.
 - **No barge-in.** Playback blocks capture. The callee cannot interrupt the holding
   phrase or the agent's speech.
 - **Text only.** No audio, video, or screen sharing is accepted or returned. There is

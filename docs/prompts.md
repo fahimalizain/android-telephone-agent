@@ -7,7 +7,7 @@ Purpose: define the prompt contract for a scheduled personal call agent: the
 system prompt, opening and fallback lines, tool schemas, and safety rules. The
 pipeline is described in [voice agent](./voice-agent.md); timing in
 [latency budget](./latency-budget.md). Context: [architecture](./architecture.md),
-[Raspberry Pi setup](./raspberry-pi-setup.md), [agent/README](../agent/README.md).
+[Bluetooth HFP](./bluetooth-hfp.md), [agent/README](../agent/README.md).
 
 Replace every `{{...}}` placeholder, remove tools the runtime does not implement,
 and test the result on the production TTS voice before calling a real number.

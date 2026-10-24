@@ -3,29 +3,28 @@
 Status: alpha; control plane implemented, voice path scaffolded | Last updated: 2026-10-24
 
 The [design brief](./design-brief.md) is authoritative. This document expands it and
-does not add hardware requirements. Device-specific behavior is marked "verify on
-your device".
+does not add host requirements. Device-specific behavior is marked "verify on your
+device".
 
 ## 1. Purpose
 
 The system places a scheduled outbound call over the public switched telephone
 network (PSTN), holds a short spoken conversation, and hangs up. The call originates
-from a real SIM in a spare Android phone ("Phone A"). A Raspberry Pi Zero 2 W appears
-to that phone as a USB-C audio headset. The callee ("Phone B") answers on an ordinary
-phone with no app, no data connection, and no special configuration. The goals are a
-genuine cellular call with a real mobile number as caller ID, no root or modem
-modification, and unattended operation from a small, low-power device.
+from a real SIM in a spare Android phone ("Phone A"). A Linux host pairs with that phone
+as a Bluetooth Hands-Free Profile (HFP) headset. The callee ("Phone B") answers on an
+ordinary phone with no app, no data connection, and no special configuration. The goals
+are a genuine cellular call with a real mobile number as caller ID, no root or modem
+modification, and unattended operation from a small Linux machine.
 
 ## 2. Scope
 
 In scope:
 
-- The USB audio path between Phone A and the Pi, in both directions, and the
-  supported Bluetooth HFP alternative.
-- Scheduling, dialing, call-progress tracking, and hangup.
-- Capture, VAD, STT, LLM, TTS, and playback.
+- The Bluetooth HFP audio path between Phone A and the Linux host, in both directions.
+- Scheduling, dialing, call-progress tracking, and hangup through the LAN helper.
+- Capture, VAD, STT, LLM, TTS, and playback over the SCO nodes.
 - Delegated outbound calls from other agents over MCP and A2A, as a control plane only.
-- Power, cooling, network, failure handling, and observability.
+- Network, failure handling, and observability.
 
 Non-goals:
 
@@ -35,8 +34,9 @@ Non-goals:
 - Inbound PSTN calls in the first milestone. The opt-in v0.3 inbound mode now answers
   them, but it has not been validated on a live call; see [Inbound calls](./inbound.md).
   Inbound control-plane tasking over MCP and A2A is in scope.
-- More than one concurrent call per phone and Pi pair.
-- Local speech models on the Zero 2 W (stretch goal on a Pi 4 or Pi 5).
+- More than one concurrent call per phone and host pair.
+- USB audio devices, single-board-computer hardware, or a fixed bill of materials. That route was
+  removed; see [ADR 0009](./decisions/0009-bluetooth-only-linux-host.md).
 - A consumer product, enclosure design, or support contract.
 
 ## 3. The core constraint: the uplink lives in the modem
@@ -65,41 +65,17 @@ cannot inject. Qualcomm `Incall_Music` is a lottery: an ADSP mixer on some older
 platforms, device-specific, frequently broken, sometimes local-only, and absent on most
 recent devices.
 
-## 4. The inversion: become the phone's headset
+## 4. The inversion: become the phone's Bluetooth headset
 
-Instead of entering the modem, the Pi becomes an accessory Android already routes
-calls to. A headset has a microphone for the uplink and a speaker for the downlink; if
-the Pi is the headset, it owns both directions.
+Instead of entering the modem, the Linux host becomes an accessory Android already routes
+calls to. A headset has a microphone for the uplink and a speaker for the downlink; if the
+host is the headset, it owns both directions.
 
-**USB Audio Class.** UAC is a standard device class. The device describes streaming
-interfaces and formats in USB descriptors; the host binds a class driver and exposes a
-sound card. Android supports USB audio, and vendors route calls to wired headsets,
-including USB-C. Routing policy is vendor-specific; verify on your device. The gadget
-uses UAC1, 48 kHz, two channels, 16-bit, for broad compatibility; UAC2 (`f_uac2`) is
-the fallback. It is built with configfs and `f_uac1`; see
-[Raspberry Pi setup](./raspberry-pi-setup.md) and
-[`uac-gadget.sh`](../scripts/uac-gadget.sh).
-
-**Both directions.** Phone A sends the downlink out of USB, where the Pi receives it
-with `arecord`; it takes the uplink from the headset microphone, supplied by `aplay`.
-The phone still does vocoding, echo cancellation, noise suppression, and transmission.
-The Pi sees PCM at the headset boundary, exactly where a human headset sits. This does
-not intercept calls on the owner's primary phone, record calls, or bypass caller-ID
-rules; it affects only calls active while the gadget is attached and selected.
-
-**No telephony control.** Dialing, SIM selection, and hangup stay in Android. A helper
-app on Phone A calls `TelecomManager.placeCall()` after a LAN request; on dual-SIM it
-must pass the agent SIM's phone account handle or One UI may show a SIM picker. See
-[Dial helper](./dial-helper.md). In the canonical USB topology, because the phone is the
-USB host, `adb` over the cable is unavailable; wireless debugging does not survive
-reboots reliably enough for unattended use. The helper is the reference path.
-
-### 4.1 Bluetooth HFP variant
-
-A second transport is supported when USB device mode is unavailable or unsuitable. The
-Linux host advertises the Hands-Free Profile **hands-free unit (HF)** role and Phone A is
-the **audio gateway (AG)**. Android already routes call audio to a Bluetooth headset, so no
-root or vendor API is involved.
+**Bluetooth HFP.** HFP is the standard profile Android uses for car kits and headsets. The
+host advertises the Hands-Free Profile **hands-free unit (HF)** role and Phone A is the
+**audio gateway (AG)**. Android routes call audio to the host over a synchronous SCO
+link. WirePlumber enables the role with the fragment in
+[`config/wireplumber/51-bt-headset.conf`](../config/wireplumber/51-bt-headset.conf).
 
 ```mermaid
 flowchart LR
@@ -122,34 +98,37 @@ flowchart LR
   TEL -.->|"cellular voice"| B
 ```
 
-WirePlumber enables the HF role with the fragment in
-[`config/wireplumber/51-bt-headset.conf`](../config/wireplumber/51-bt-headset.conf). While
-a call is active, PipeWire creates two nodes for the phone's Bluetooth address:
+While a call is active, PipeWire creates two nodes for the phone's Bluetooth address:
 
 | Direction | Node | Factory | Media class | Agent action |
 |---|---|---|---|---|
 | Callee to agent (downlink) | `bluez_input.<address>.<id>` | `api.bluez5.sco.source` | `Stream/Output/Audio` | Capture with `pw-record` |
 | Agent to callee (uplink) | `bluez_output.<address>.<id>` | `api.bluez5.sco.sink` | `Stream/Input/Audio` | Play with `pw-play` |
 
-The direction is not inverted as it is on the USB gadget: capture from the SCO source is
-the remote party, and playback to the SCO sink is the agent's voice. The `.<id>` suffix is
-a SPA object id and can change per connection, so the agent discovers nodes by
-`api.bluez5.address` and `factory.name`. The nodes exist only during a call or SCO link;
-the backend waits up to `node_timeout_s` for them.
+The direction is direct: capture from the SCO source is the remote party, and playback to
+the SCO sink is the agent's voice. SCO nodes exist only during a call or SCO link; the
+backend waits up to `node_timeout_s` for them. The `.<id>` suffix is a SPA object id and
+can change per connection, so the agent discovers nodes by `api.bluez5.address` and
+`factory.name`.
 
-HFP call control is not implemented. The LAN helper remains responsible for dialing and
-hangup, and Phone A must be reachable on the LAN. The Bluetooth path therefore changes the
-audio transport only.
+**No telephony control over HFP.** Dialing, SIM selection, answering, and hangup stay in
+Android. A helper app on Phone A calls `TelecomManager.placeCall()` after a LAN request;
+on dual-SIM it must pass the agent SIM's phone account handle or One UI may show a SIM
+picker. See [Dial helper](./dial-helper.md). HFP AT commands are not implemented, so the
+phone must be reachable on the LAN.
 
-The host must run the agent in the same user session as PipeWire and WirePlumber, normally
-a systemd user service with lingering. The system-level one-shot unit used for the USB path
-does not work unchanged. See [Bluetooth HFP](./bluetooth-hfp.md) and
+**User-session coupling.** The host must run the agent in the same user session as
+PipeWire and WirePlumber, normally a systemd user service with lingering. A system-level
+service running as another user does not share that session and cannot see the SCO nodes.
+See [Bluetooth HFP](./bluetooth-hfp.md) and
 [ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
 
-This variant was validated end to end on a Linux laptop with a Samsung Galaxy A23 4G over
+This path was validated end to end on a Linux laptop with a Samsung Galaxy A23 4G over
 outbound PSTN calls: mSBC at 16 kHz in both directions, with the Grok Voice realtime
-adapter holding a five-turn conversation. The Pi Zero 2 W, live inbound calls, and latency
-measurements remain unvalidated. The cellular codec still caps fidelity.
+adapter holding a five-turn conversation. The link was weak (RSSI about -87 dBm), and the
+first call dropped Bluetooth during setup and needed a manual reconnect; later calls were
+stable. Live inbound calls and latency measurements remain unvalidated. The cellular
+codec still caps fidelity.
 
 ## Control plane: MCP and A2A
 
@@ -167,7 +146,7 @@ flowchart LR
     LLM["LLM host<br/>MCP client"]
     AGT["Requester agent<br/>A2A client"]
   end
-  subgraph RT["Agent runtime on the Pi"]
+  subgraph RT["Agent runtime on the Linux host"]
     MCP["MCP server<br/>Streamable HTTP<br/>:8765/mcp"]
     A2A["A2A server<br/>JSON-RPC over HTTP<br/>:8766/a2a"]
     SVC["CallService<br/>FIFO queue, one active call<br/>in-memory tasks, optional audit"]
@@ -216,51 +195,44 @@ control, not a natural voice conversation out of the box. See
 ```mermaid
 flowchart LR
   subgraph PA["Phone A: Galaxy A23 4G"]
-    USB["USB-C port"]
+    BT["Bluetooth"]
     TEL["Telecom + SIM A"]
     HLP["Dial helper"]
   end
-  subgraph PI["Pi Zero 2 W"]
-    GAD["f_uac1 gadget"]
-    BR["Audio bridge"]
-    OR["Orchestrator + logs"]
+  subgraph HOST["Linux host"]
+    ADP["Bluetooth adapter"]
+    BTSTACK["BlueZ + WirePlumber"]
+    PW["PipeWire SCO nodes"]
+    OR["Agent runtime + logs"]
   end
   subgraph SITE["Home site"]
-    HUB["USB-C hub, PD input"]
     RTR["Wi-Fi router"]
   end
   subgraph CLOUD["Cloud providers"]
     VOICE["STT / LLM / TTS<br/>or Grok Voice realtime"]
   end
   B["Phone B: callee"]
-  HUB -->|"PD"| USB
-  HUB -->|"5 V"| GAD
-  HUB <-->|"USB data"| USB
-  USB <-->|"UAC1"| GAD
-  USB --> TEL
+  BT <-->|"HFP SCO"| ADP
+  ADP <--> BTSTACK
+  BTSTACK <--> PW
+  PW <--> OR
+  BT --> TEL
   TEL -.->|"cellular voice"| B
   HLP <-->|"LAN HTTP"| OR
-  GAD <--> BR
-  BR <--> OR
-  BR <-->|"audio"| VOICE
-  OR <--> VOICE
   OR <--> RTR
   RTR <-->|"internet"| VOICE
 ```
 
-The charger and hub power Phone A over USB-C PD and the Pi over a USB-A port. The
-phone is the USB data host and a power sink; the Pi is the USB device and is
-bus-powered. The hub carries both power and data, so it is a single point of failure.
-
-For the Bluetooth HFP variant, replace the USB audio edge with the SCO link in section
-4.1. The helper, LAN, and cloud paths are unchanged; Phone A can charge from any USB
-charger because its port is no longer the audio link.
+Phone A charges from its own charger; the host runs from mains power. The Bluetooth link
+carries call audio, and the LAN carries call control. Either the LAN or the Bluetooth
+link can fail independently, so a reachable phone does not prove audio is available and
+a connected Bluetooth link does not prove the helper can dial.
 
 ## 6. A scheduled call, end to end
 
 ```mermaid
 sequenceDiagram
-    participant SCH as Cron / timer
+    participant SCH as Systemd user timer
     participant DIA as Dialer
     participant HLP as Helper app
     participant TEL as TelecomManager
@@ -272,19 +244,19 @@ sequenceDiagram
     participant TTS as TTS
 
     SCH->>DIA: scheduled slot due
-    DIA->>HLP: POST /dial (E.164, call_id, token)
+    DIA->>HLP: POST /call (E.164, call_id, token)
     HLP->>TEL: placeCall(tel:+91..., account)
     TEL->>MOD: set up voice call
     MOD->>CAL: alerting
     CAL-->>MOD: answer
-    MOD-->>AGE: call audio over UAC1 (SCO-equivalent), arecord
+    MOD-->>AGE: call audio over HFP SCO, pw-record
     AGE->>STT: 16 kHz mono frames
     STT-->>AGE: partial and final transcripts
     AGE->>LLM: transcript and context
     LLM-->>AGE: streamed tokens
     AGE->>TTS: sentence chunks
     TTS-->>AGE: streamed audio
-    AGE-->>MOD: aplay to gadget, then uplink
+    AGE-->>MOD: pw-play to SCO sink, then uplink
     MOD-->>CAL: agent speech
     Note over AGE: Barge-in stops playback; endpointing 300-500 ms
     AGE->>HLP: optional end request, or timeout
@@ -292,38 +264,33 @@ sequenceDiagram
     TEL->>MOD: hang up
 ```
 
-The scheduler may be cron or a systemd timer. Call-progress events are best effort:
-the helper can report that `placeCall()` was accepted, but a normal app does not
-reliably receive every telecom transition. The agent treats the first downlink speech
-as evidence that the callee answered, and continued silence as ringing until the ring
-timeout. The dialer records the slot, destination, and attempt number before sending
-and does not resend while the attempt is unresolved.
+The scheduler is a systemd user timer. Call-progress events are best effort: the helper
+can report that `placeCall()` was accepted, but a normal app does not reliably receive
+every telecom transition. The agent treats the first downlink speech as evidence that the
+callee answered, and continued silence as ringing until the ring timeout. The dialer
+records the slot, destination, and attempt number before sending and does not resend
+while the attempt is unresolved. SCO nodes appear after the call is answered, not while
+it is ringing.
 
 ## 7. Audio direction
 
-The ALSA direction on a USB gadget is inverted relative to a normal sound card. On a
-normal card, `aplay` reaches a speaker and `arecord` reads a microphone. On the
-gadget, the host (Phone A) owns the speaker and microphone, so the Pi's playback
-stream is what the host records from its "microphone", and the Pi's capture stream is
-what the host plays to its "speaker". Verify this with a loopback test before
-connecting the agent.
+Bluetooth HFP does not invert the direction as a USB audio route would. The SCO source is the
+downlink that Phone A would play in its earpiece, and the SCO sink is the uplink Phone A
+would take from its microphone. `pw-record` and `pw-play` map directly to capture and
+playback.
 
-| Direction | Pi command | Gadget ALSA stream | USB direction | Phone A port | Result |
-|---|---|---|---|---|---|
-| Agent to callee | `aplay -D plughw:CARD=UAC1Gadget,DEV=0` | Playback | Device to host (IN) | Headset microphone | Remote party hears the agent |
-| Callee to agent | `arecord -D plughw:CARD=UAC1Gadget,DEV=0` | Capture | Host to device (OUT) | Headset earpiece | Agent hears the remote party |
+| Direction | PipeWire node | Agent command | Phone A path | Result |
+|---|---|---|---|---|
+| Callee to agent | `bluez_input.<address>.<id>` (`api.bluez5.sco.source`) | `pw-record --target <node>` | Earpiece / downlink | Agent hears the remote party |
+| Agent to callee | `bluez_output.<address>.<id>` (`api.bluez5.sco.sink`) | `pw-play --target <node>` | Microphone / uplink | Remote party hears the agent |
 
-The card name depends on the kernel, udev rules, and gadget configuration; confirm it
-with `aplay -l` and `arecord -l`. `plughw` converts between the gadget's fixed 48 kHz
-stereo format and the pipeline format. The pipeline downmixes and resamples the
-downlink to 16 kHz mono for STT and TTS output to 48 kHz stereo. The 48 kHz rate is a
-transport format, not a promise of wideband speech; the codec sets the bandwidth. If a
-direction is silent, check USB audio routing and the phone's "Disable USB audio
-routing" setting; verify the selected route on your device.
-
-The Bluetooth HFP variant in section 4.1 does not invert the direction. Its SCO source is
-the downlink and its SCO sink is the uplink, so `pw-record` and `pw-play` map directly to
-capture and playback.
+The codec is mSBC at 16 kHz or CVSD at 8 kHz. PipeWire resamples between the stream and
+the SCO link; the pipeline resamples the downlink to 16 kHz mono for STT and TTS output to
+the SCO rate for playback. The SCO rate is a transport format, not a promise of wideband
+speech; the cellular codec sets the bandwidth. If a direction is silent, confirm the
+phone routes call audio to Bluetooth, check **Calls and audio** for the host, and verify
+the node mapping with `scripts/bluetooth-check.sh` and
+`scripts/bluetooth-audio-test.sh` during a call.
 
 ## 8. Call state machine
 
@@ -345,12 +312,13 @@ stateDiagram-v2
     FAILED --> IDLE: retries exhausted
 ```
 
-- **IDLE** has no call; **SCHEDULED** runs preflight (helper, ALSA card, ledger,
-  provider health, SIM registration if available); **DIALING** means the request is with
-  the helper; **RINGING** means the helper accepted and the network is alerting or early
-  media; **IN_CALL** runs the audio loop; **ENDING** stops playback and waits for
-  disconnect; **FAILED** records the cause. If `endCall()` is not permitted, ENDING plays
-  a closing prompt and waits for the remote party to hang up.
+- **IDLE** has no call; **SCHEDULED** runs preflight (helper, Bluetooth adapter and phone
+  connection, ledger, provider health, SIM registration if available); **DIALING** means
+  the request is with the helper; **RINGING** means the helper accepted and the network is
+  alerting or early media; **IN_CALL** runs the audio loop once the SCO nodes appear;
+  **ENDING** stops playback and waits for disconnect; **FAILED** records the cause. If
+  `endCall()` is not permitted, ENDING plays a closing prompt and waits for the remote
+  party to hang up.
 
 Timeouts are configuration, not protocol constants. Starting values:
 
@@ -374,12 +342,12 @@ cannot silently corrupt call state.
 | Boundary | Crosses | Fails independently when | Detection |
 |---|---|---|---|
 | Phone, SIM, carrier | Dial requests, audio, registration | Reboot, helper killed, no credit, no coverage, SIM picker, routing change | Helper heartbeat, failed dial, missing audio |
-| Hub, cables, power | Power and USB data | PD failure, cable strain, brownout, data link drop, mains outage | Gadget disappears, undervoltage, missed heartbeat |
-| Raspberry Pi | Audio, scheduling, provider calls | SD wear, kernel or gadget fault, throttling, power loss | Watchdog, missing heartbeat, ALSA errors |
+| Bluetooth link | SCO audio | Pairing lost, adapter reset, phone out of range, profile not connected, SCO missing | `scripts/bluetooth-check.sh`, `pw-dump`, missing audio |
+| Linux host | Audio, scheduling, provider calls | Kernel or PipeWire fault, disk full, power loss | Host watchdog, missing heartbeat, journal errors |
 | LAN and Wi-Fi | Helper API, provider traffic | Router outage, 2.4 GHz congestion, firewall change | Preflight failure, provider timeouts |
 | Cloud providers | Audio and transcripts | Outage, quota, latency spike, expired credential | Health check, TTFT/TTFA, error rate |
 
-The phone is the authority for call placement; the Pi cannot force a call if the phone
+The phone is the authority for call placement; the host cannot force a call if the phone
 refuses, is unregistered, or has no credit. The helper should expose a minimal API,
 bind only to the private LAN, require a bearer token, and reject destinations outside
 an allowlist. Never port-forward it.
@@ -392,10 +360,8 @@ pipeline does not persist audio. Operational logs should redact full numbers and
 transcripts; the opt-in local transcript described in section 12 is a separate file that
 contains full detail.
 
-A power cut is asymmetric: Phone A survives on its battery, but the Pi and router stop
-unless the UPS covers them, so a call in progress fails. See
-[Power and thermal](./power-and-thermal.md) and verify the UPS-to-hub wiring for the
-chosen hardware.
+A power cut is asymmetric: Phone A survives on its battery, but the host and router stop
+unless they have their own backup, so a call in progress fails.
 
 ## 10. Alternatives considered
 
@@ -420,40 +386,33 @@ an Android phone, but it is expensive and bulky and subject to licensing and
 interconnect rules that vary by country; in India, GSM gateways and SIM boxes are
 regulated and may not be lawful here.
 
-### Bluetooth HFP
-
-Bluetooth HFP is a **supported alternative**, not a rejected one. The host acts as the
-hands-free unit (HF) and Phone A as the audio gateway (AG), and PipeWire exposes the
-call as a SCO source and sink. It avoids a USB data cable, does not need USB device mode,
-and the phone can charge from a separate charger. It is not the default because pairing
-and reconnection are additional failure modes for unattended operation, the phone can
-route to the wrong device, SCO nodes exist only while a call is active, the codec varies
-between mSBC and CVSD, the agent must share the PipeWire user session, and 2.4 GHz Wi-Fi
-shares spectrum with Bluetooth. See [Bluetooth HFP](./bluetooth-hfp.md) and
-[ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
-
 ### Acoustic coupling
 
-Acoustic coupling would avoid USB, root, and pairing, but it is the least deterministic
-option: levels drift, the phone's noise suppression and echo cancellation interfere,
-room noise enters both directions, and speakerphone mode may be required.
+Acoustic coupling would avoid Bluetooth, root, and pairing, but it is the least
+deterministic option: levels drift, the phone's noise suppression and echo cancellation
+interfere, room noise enters both directions, and speakerphone mode may be required.
+
+### USB audio route (removed)
+
+A USB Audio Class device was the earlier design. It required the host to act as a USB
+device, a data-capable USB port on the phone, and a powered hub, and it was never
+validated on hardware. The route, its scripts, and its hardware documentation were
+removed on 2026-10-24. See [ADR 0009](./decisions/0009-bluetooth-only-linux-host.md).
 
 ## 11. Capacity and limits
 
-- **One call at a time per phone and Pi pair, including the Zero 2 W.** One SIM, radio,
-  audio transport, and audio loop; concurrency needs more pairs, not threads. Inbound and
-  outbound calls share the same call slot and are serialized: the helper rejects `/call`
-  while a call is ringing or active.
-- **The Zero 2 W suits a network-bound pipeline.** Audio and resampling are small next
-  to cloud STT, LLM, and TTS. Its 512 MB rules out local models, and journald is
-  volatile; the ledger is the small persistent exception.
-- **USB 2.0 is not the limit.** The gadget stream is about 1.5 Mbit/s each way; buffer
-  sizing, clock drift, and ALSA underruns (`xrun`) matter more.
-- **Bluetooth HFP is narrower than USB.** mSBC carries 16 kHz and CVSD carries 8 kHz;
+- **One call at a time per phone and host pair.** One SIM, radio, audio link, and audio
+  loop; concurrency needs more pairs, not threads. Inbound and outbound calls share the
+  same call slot and are serialized: the helper rejects `/call` while a call is ringing or
+  active.
+- **Bluetooth HFP is the narrowest link.** mSBC carries 16 kHz and CVSD carries 8 kHz;
   either is enough for the cellular codec, but Bluetooth adds a shared 2.4 GHz link and
   SCO retransmission to the latency budget.
 - **The telephony codec caps fidelity.** AMR-NB is 8 kHz, AMR-WB is 16 kHz, EVS adapts.
-  The 48 kHz gadget avoids extra resampling but cannot add cellular bandwidth.
+  The SCO link cannot add cellular bandwidth.
+- **The host is network-bound.** Audio, resampling, and VAD are small next to cloud STT,
+  LLM, and TTS. Local speech models need more CPU and RAM than the reference laptop and
+  remain a stretch goal.
 - **Duration and retries are bounded.** A hard maximum call duration, a silence timeout,
   and at most two retries prevent a stuck call or unbounded provider cost.
 
@@ -466,8 +425,8 @@ redacted destination. Provider events record TTFT and TTFA without storing audio
 Every call ends with one outcome: `answered_and_completed`, `no_answer`, `busy`,
 `rejected`, `failed_setup`, `failed_audio`, `provider_error`, or `timeout`. The outcome
 goes to the ledger and the daily heartbeat; a missing heartbeat is itself an alert.
-The heartbeat reports helper reachability, audio backend availability (USB gadget
-enumeration or Bluetooth SCO nodes), call duration, and the last outcome.
+The heartbeat reports helper reachability, Bluetooth adapter and SCO availability, call
+duration, and the last outcome.
 
 Audio is not persisted. Local transcripts are opt-in with `[transcript].enabled = true`:
 one timestamped JSONL file per call, created with mode `0600` in a directory with mode
@@ -486,7 +445,8 @@ Carried from the [design brief](./design-brief.md); status as of 2026-10-24.
 1. **Language.** Malayalam, English, or code-mixed; Sarvam supports Malayalam, but
    code-mixed quality varies by vendor and needs evaluation.
 2. **Helper app.** Reference Kotlin app or Tasker/MacroDroid for the first milestone.
-3. **Local fallback models.** Pi 4 or Pi 5 with Whisper.cpp and Piper, or cloud-only.
+3. **Local fallback models.** A larger Linux host with Whisper.cpp and Piper, or
+   cloud-only.
 4. **Call content and persona.** Briefing, check-in, or reminder; prompt design is out of scope.
 5. **Inbound calls. Implemented, pending live validation.** The helper exposes
    `GET /state` and `POST /answer`; an `inbound` daemon polls and answers every ringing
@@ -496,10 +456,9 @@ Carried from the [design brief](./design-brief.md); status as of 2026-10-24.
 
 ## 14. Related documents
 
-[Design brief](./design-brief.md), [hardware](./hardware.md),
-[power and thermal](./power-and-thermal.md), [Raspberry Pi setup](./raspberry-pi-setup.md),
-[Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md),
+[Design brief](./design-brief.md), [Bluetooth HFP](./bluetooth-hfp.md),
+[Inbound calls](./inbound.md), [Android setup](./android-setup.md),
 [dial helper](./dial-helper.md), [voice agent](./voice-agent.md),
 [interoperability](./interop.md), [latency budget](./latency-budget.md),
-[operations](./operations.md), [runbook](./runbook.md), [glossary](./glossary.md), and the
-[ADRs](./decisions/0001-use-usb-audio-gadget-instead-of-root.md).
+[operations](./operations.md), [runbook](./runbook.md), [glossary](./glossary.md), and
+the [ADRs](./decisions/0009-bluetooth-only-linux-host.md).

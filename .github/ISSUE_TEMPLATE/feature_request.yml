@@ -34,12 +34,12 @@ body:
       description: Choose the part of the project this request affects most.
       options:
         - Documentation
-        - USB gadget and audio routing
+        - Bluetooth HFP link or SCO audio
         - Android setup or helper app
         - Dialing and call control
+        - Inbound answering
         - Voice agent runtime
         - Scripts and systemd
-        - Power, thermal, or hardware
         - Other
     validations:
       required: true
@@ -52,7 +52,7 @@ body:
     id: hardware-impact
     attributes:
       label: Hardware and compatibility impact
-      description: Does this require a different phone, Pi model, hub, or Android version? Does it affect the USB gadget or call routing?
+      description: Does this require a different phone, Linux host, Bluetooth adapter, or Android version? Does it affect HFP call routing?
       placeholder: Describe any device or OS requirement, or write "None identified".
   - type: checkboxes
     id: checks

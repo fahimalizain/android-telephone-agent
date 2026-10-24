@@ -32,11 +32,12 @@ Do not include phone numbers, SIM identifiers, IMEI numbers, or tokens. -->
 | Device | Model | OS or build | Result |
 |---|---|---|---|
 | Phone A | | | |
-| Raspberry Pi | | | |
-| Hub and power | | | |
+| Linux host | | | |
+| Bluetooth adapter | | | |
 
-Call path details, if relevant: SIM slot, VoLTE state, mobile network operator, and
-whether the USB gadget enumerated.
+Call path details, if relevant: SIM slot, VoLTE state, mobile network operator, negotiated
+codec (mSBC or CVSD), and whether both SCO nodes appeared. For host software, include the
+Linux distribution, kernel, BlueZ, PipeWire, and WirePlumber versions.
 
 ## Checklist
 
@@ -46,7 +47,7 @@ whether the USB gadget enumerated.
 - [ ] No secrets, phone numbers, SIM identifiers, IMEI numbers, or personal data are
       included.
 - [ ] Markdown linting passes for changed documentation.
-- [ ] Hardware claims are hedged as "verify on your device" unless enforced by the USB
-      or Android specification.
+- [ ] Hardware claims are hedged as "verify on your device" unless enforced by the
+      Android or Bluetooth specification.
 - [ ] `CHANGELOG.md` has an entry under `Unreleased` for user-visible changes.
 - [ ] I followed the Code of Conduct.

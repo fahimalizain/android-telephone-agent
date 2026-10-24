@@ -1,37 +1,40 @@
 # Operations
 
-This document covers running android-telephone-agent after setup: the operating model, daily
-timeline, health checks, scheduling, alerting, logging, maintenance, and recovery. The reference
-deployment is one Raspberry Pi Zero 2 W, one Android phone, one SIM, and one household. Confirm
-names and paths against your installation; verify device-specific behavior on your device.
+This document covers running android-telephone-agent after setup: the operating model,
+daily timeline, health checks, scheduling, alerting, logging, maintenance, and recovery.
+The reference deployment is one Linux host, one Android phone, one SIM, and one household.
+Confirm names and paths against your installation; verify device-specific behavior on your
+device.
 
-Related: [hardware](./hardware.md), [Raspberry Pi setup](./raspberry-pi-setup.md),
-[Android setup](./android-setup.md), and
-[telephone-agent.service](../scripts/systemd/telephone-agent.service).
+Related: [Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md),
+[Inbound calls](./inbound.md), the
+[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), the
+[Bluetooth timer](../scripts/systemd/telephone-agent-bluetooth.timer), and the
+[inbound user service](../scripts/systemd/telephone-agent-inbound.service).
 
 ## 1. Operating model
 
-- **One call at a time.** The gadget has one playback and one capture stream, and Android routes
-  one cellular call to it. Never start a second call or run a loopback test during a live call.
-- **Scheduled daily.** The reference schedule places one call per day. Extra slots are allowed if
-  the previous call has ended and the phone is idle.
-- **Unattended.** The operator does not touch the Pi during a call. The callee answers an ordinary
-  voice call. Intervention is limited to alerts and maintenance.
-- **Single household.** One owner, one agent phone, one callee group. The design is not multi-tenant.
+- **One call at a time.** HFP exposes one SCO source and one SCO sink, and Android routes
+  one cellular call to them. Never start a second call or run an audio test during a live
+  call.
+- **Scheduled daily.** The reference schedule places one call per day. Extra slots are
+  allowed if the previous call has ended and the phone is idle.
+- **Unattended.** The operator does not touch the host during a call. The callee answers
+  an ordinary voice call. Intervention is limited to alerts and maintenance.
+- **Single household.** One owner, one agent phone, one callee group. The design is not
+  multi-tenant.
 
-The Pi is the phone's headset, not a modem. The agent plays audio to the gadget, which the phone
-treats as headset microphone input, and captures what the phone would send to the headset earpiece.
-The runtime is a `Type=oneshot` service triggered by a daily systemd timer. Enable the hardware
-watchdog so a hung kernel reboots the Pi; a watchdog reboot during a slot still means a missed call.
-Do not add `Restart=always`: restarting a unit that dials would redial. See the
+The host is the phone's Bluetooth headset, not a modem. The agent plays audio to the SCO
+sink, which Phone A treats as headset microphone input, and captures the SCO source, which
+is what Phone A would send to the headset earpiece. The runtime is a `Type=oneshot` systemd
+**user** service triggered by a user timer. Do not add `Restart=always`: restarting a unit
+that dials would redial. The inbound watcher is the exception; it is long-lived, polls
+instead of dialing, and uses `Restart=always`.
+
+The agent must run in the same user session as PipeWire and WirePlumber. A system service
+running as another user has a different session bus and `XDG_RUNTIME_DIR` and cannot see
+the SCO nodes. Enable lingering on a headless host. See the
 [design brief](./design-brief.md) for the architecture constraints.
-
-For the Bluetooth HFP alternative, the audio path is the host's HFP SCO link with Phone A
-rather than the USB gadget. Scheduling, the LAN helper, provider calls, alerting, and the
-one-call-at-a-time rule are unchanged. The USB-specific checks below (gadget enumeration
-and UAC card) do not apply; use the adapter roles, phone connection, and SCO nodes from
-[Bluetooth HFP](./bluetooth-hfp.md) instead. The agent must run in the PipeWire user
-session, so use the Bluetooth user units rather than the root USB unit.
 
 ## 2. Daily call timeline
 
@@ -42,127 +45,143 @@ session, so use the Bluetooth user units rather than the root USB unit.
 | T-0 | Dial | Submit callee number and agent SIM to helper | Retry at most twice with backoff, inside the grace window |
 | T-0 to timeout | Ringing | Wait for answer, default 45 s | End attempt, record `no_answer`, alert |
 | Answer | Conversation | STT, LLM, TTS with barge-in and endpointing | Hang up on hard limit or prolonged silence |
-| End | Hangup | Request call end, release audio devices | Ask the callee to hang up and wait for idle |
+| End | Hangup | Request call end, release audio streams | Ask the callee to hang up and wait for idle |
 | End + 5 s | Post-call | Write call record and daily heartbeat | Alert on a missing record |
 
-The T-60 gate exists because a call with a missing gadget or offline phone connects with no audio,
-which is worse than a skipped call. A skipped call is visible and recoverable; a silent call wastes the
-callee's time and may look like a nuisance call.
+The T-60 gate exists because a call with a missing Bluetooth link or an offline phone
+connects with no audio, which is worse than a skipped call. A skipped call is visible and
+recoverable; a silent call wastes the callee's time and may look like a nuisance call.
 
-The conversation has a hard maximum duration, a silence timeout, and barge-in. Hangup is best effort:
-`TelecomManager.endCall()` requires privileged access on modern Android, so the helper may be unable
-to end the call. The agent then stops playback, releases the devices, and waits for the remote party
-or network to end it. The next slot must not start until the call ends or the hard timeout expires.
+The conversation has a hard maximum duration, a silence timeout, and barge-in. Hangup is
+best effort: `TelecomManager.endCall()` requires privileged access on modern Android, so
+the helper may be unable to end the call. The agent then stops playback, releases the
+streams, and waits for the remote party or network to end it. The next slot must not start
+until the call ends or the hard timeout expires.
 
 ## 3. Health checks
 
 ```bash
 export PHONE_HOST="192.168.1.50"   # DHCP reservation; verify
+export BT_ADDRESS="AA:BB:CC:DD:EE:FF"  # Phone A; verify
 export PROVIDER_HEALTH_URL="https://api.example.com/health"  # replace
 ```
 
 | Check | Command | Pass | Class |
 |---|---|---|---|
-| Gadget enumerated | `test -n "$(cat /sys/kernel/config/usb_gadget/agent/UDC)" && echo ok` | `ok` | Hard |
-| Gadget sound card | `grep -qi uac /proc/asound/cards && echo ok` | `ok` | Hard |
+| Bluetooth adapter and phone | `./scripts/bluetooth-check.sh --idle "$BT_ADDRESS"` | exit 0 | Hard |
+| SCO nodes during a call | `./scripts/bluetooth-check.sh "$BT_ADDRESS"` | exit 0 | Hard |
 | Phone reachable | `curl -fsS --max-time 3 "http://$PHONE_HOST:8765/health"` | HTTP 200 | Hard |
+| Inbound watcher active | `systemctl --user is-active telephone-agent-inbound.service` | `active` when inbound is enabled | Hard |
 | Time synchronized | `timedatectl show -p NTPSynchronized --value` | `yes` | Hard |
 | Time zone | `timedatectl show -p Timezone --value` | `Asia/Kolkata` | Hard |
 | Provider reachable | `curl -fsS --max-time 4 -o /dev/null -w '%{http_code}\n' "$PROVIDER_HEALTH_URL"` | 2xx | Hard |
 | Disk | `df -P / \| awk 'NR==2 {print $5}'` | < 85% | Warn, hard at 95% |
-| Temperature | `vcgencmd measure_temp` | < 80 C | Warn, hard at 85 C |
-| Throttling | `vcgencmd get_throttled` | `0x0` | Warn; hard if active |
 
-A hard failure aborts the call; a warning is logged and included in the heartbeat. The provider probe
-may be an unauthenticated status endpoint or the agent's authenticated check; never put an API key on
-a command line where local users can read it from the process list.
+A hard failure aborts the call; a warning is logged and included in the heartbeat. The
+provider probe may be an unauthenticated status endpoint or the agent's authenticated
+check; never put an API key on a command line where local users can read it from the
+process list.
 
-For `audio.backend = "pipewire"`, replace the two gadget checks with the Bluetooth HFP checks:
-the adapter advertises Headset (0x1108) and Handsfree (0x111e), Phone A is connected, and
-both SCO nodes exist during a call. `scripts/bluetooth-check.sh <mac>` covers all three;
-see [Bluetooth HFP](./bluetooth-hfp.md). The helper, time, provider, disk, temperature,
-and throttling checks are unchanged.
+The idle check covers the adapter roles, the bond, and the phone connection. The full
+check adds the two SCO nodes and can only pass during an active call. `scripts/bluetooth-check.sh`
+covers all of these; see [Bluetooth HFP](./bluetooth-hfp.md). Do not treat an idle check
+as proof that call audio will work.
 
-Time sync matters because the Pi Zero 2 W has no battery-backed clock. After a power cut, provider
-request signing and TLS validation can fail until NTP succeeds. The reference helper's health response
-reports liveness, device model, and SIM label; it is unauthenticated, so keep port 8765 on the LAN.
+Time sync matters because a host without a battery-backed clock, or one that has just
+booted after a power cut, can have the wrong time until NTP succeeds. Certificate
+validation and provider request signing then fail in ways that look like expired keys or
+provider outages. The helper's health response reports liveness, device model, and SIM
+label; it is unauthenticated, so keep port 8765 on the LAN.
 
 ## 4. Scheduling
 
-Use a systemd timer. It logs through journald, is inspectable with `systemctl list-timers`, can order
-after network and gadget units, and controls catch-up explicitly. Cron has one-minute granularity and
-inherits the system time zone; `CRON_TZ` support varies.
+Use a systemd **user** timer. It logs through journald, is inspectable with
+`systemctl --user list-timers`, can order after PipeWire and WirePlumber, and controls
+catch-up explicitly. Cron has one-minute granularity and inherits the system time zone;
+`CRON_TZ` support varies.
 
-Set the system time zone to `Asia/Kolkata` and also state the zone in the timer. Verify with
-`systemd-analyze calendar '*-*-* 08:00:00 Asia/Kolkata'` before enabling it.
+Set the system time zone to `Asia/Kolkata` and also state the zone in the timer. Verify
+with `systemd-analyze calendar '*-*-* 08:00:00 Asia/Kolkata'` before enabling it.
 
-The shipped units are [telephone-agent.service](../scripts/systemd/telephone-agent.service), a
-`Type=oneshot` unit that places one call and exits, and
-[telephone-agent.timer](../scripts/systemd/telephone-agent.timer), which triggers it. Scheduling stays
-outside the runtime. Claim the slot before dialing so a timer retry cannot place a duplicate call.
+The shipped units are
+[telephone-agent-bluetooth.service](../scripts/systemd/telephone-agent-bluetooth.service),
+a `Type=oneshot` user unit that places one call and exits, and
+[telephone-agent-bluetooth.timer](../scripts/systemd/telephone-agent-bluetooth.timer),
+which triggers it. Scheduling stays outside the runtime. Claim the slot before dialing so
+a timer retry cannot place a duplicate call.
 
 ```ini
-# /etc/systemd/system/telephone-agent.timer (shipped example)
+# ~/.config/systemd/user/telephone-agent-bluetooth.timer (shipped example)
 [Timer]
 OnCalendar=*-*-* 08:00:00 Asia/Kolkata
 AccuracySec=1s
 Persistent=false
-Unit=telephone-agent.service
+Unit=telephone-agent-bluetooth.service
 [Install]
 WantedBy=timers.target
 ```
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now telephone-agent.timer
-systemctl list-timers --all | grep telephone
+systemctl --user daemon-reload
+systemctl --user enable --now telephone-agent-bluetooth.timer
+systemctl --user list-timers --all | grep telephone
 ```
 
-India has no daylight saving time, but the code must still use IANA zones through `zoneinfo`, never a
-fixed `+05:30` offset. Store slot identifiers with an explicit offset.
+India has no daylight saving time, but the code must still use IANA zones through
+`zoneinfo`, never a fixed `+05:30` offset. Store slot identifiers with an explicit offset.
 
-**Idempotency.** Derive a key per slot from the slot start and a hash of the phone and SIM identifiers.
-Claim it in the state directory before dialing. A restart, overlapping timer, or operator retry must
-reuse the key and observe that it is claimed; retries increment an attempt number under that key.
+**Idempotency.** Derive a key per slot from the slot start and a hash of the phone and SIM
+identifiers. Claim it in the state directory before dialing. A restart, overlapping timer,
+or operator retry must reuse the key and observe that it is claimed; retries increment an
+attempt number under that key.
 
-**Missed runs.** Set `Persistent=false` and enforce a grace window, for example 10 minutes. If the Pi,
-network, or phone was unavailable, do not call when service returns outside the window. Record
-`missed_slot` and alert. Quiet hours, for example 21:00 to 07:00 local, override any catch-up logic.
+**Missed runs.** Set `Persistent=false` and enforce a grace window, for example 10 minutes.
+If the host, network, or phone was unavailable, do not call when service returns outside
+the window. Record `missed_slot` and alert. Quiet hours, for example 21:00 to 07:00 local,
+override any catch-up logic.
+
+**Inbound versus outbound.** The inbound watcher and the outbound timer both use the one
+call slot. Do not enable both for the same phone. The helper rejects `/call` while a call
+is ringing or active, and the watcher waits for `idle` before re-arming.
 
 ## 5. Alerting
 
-Use ntfy or a Telegram bot. Both are outbound-only, need no inbound port, and reach a phone. Keep the
-topic or bot token in a root-readable environment file, not the repository. Send a test alert at
-installation and after credential rotation.
+Use ntfy or a Telegram bot. Both are outbound-only, need no inbound port, and reach a
+phone. Keep the topic or bot token in a user-readable environment file, not the
+repository. Send a test alert at installation and after credential rotation.
 
 | Event | Severity |
 |---|---|
 | No call record within 2 minutes of the slot | Page |
 | Answered call under 20 seconds | Page |
 | One-way audio heuristic | Page |
-| Gadget missing, or phone offline > 5 minutes in the call window | Page |
+| Bluetooth adapter missing, phone disconnected > 5 minutes in the call window, or SCO nodes missing during a call | Page |
+| Inbound watcher inactive when inbound is enabled | Page |
 | Provider authentication or 5xx error at T-60 | Page |
 | SIM out of credit or no cellular signal | Page |
 | Two consecutive skipped or failed calls | Page |
-| Disk > 85%, temperature > 80 C, active throttling | Warn |
+| Disk > 85%, host temperature high, or storage errors | Warn |
 | Daily heartbeat: call placed, duration, outcome | Info |
 
-Do not alert on a single retry still in progress, a Wi-Fi blip under a minute, a normal completed call,
-or a callee hanging up after a full conversation. Send one daily summary rather than every heartbeat.
-Suppress duplicate alerts for the same incident key for six hours and send a recovery notice after the
-next success. Alerts must not contain transcripts, audio, full phone numbers, tokens, or SIM identifiers.
+Do not alert on a single retry still in progress, a Wi-Fi blip under a minute, a normal
+completed call, or a callee hanging up after a full conversation. Send one daily summary
+rather than every heartbeat. Suppress duplicate alerts for the same incident key for six
+hours and send a recovery notice after the next success. Alerts must not contain
+transcripts, audio, full phone numbers, tokens, or SIM identifiers.
 
-One-way audio detection is heuristic: for example, agent speech was produced but no meaningful inbound
-energy arrived for several seconds after the callee was expected to speak, or the reverse. Codec and
-network behavior can cause false positives, so the alert asks for confirmation with a test call.
+One-way audio detection is heuristic: for example, agent speech was produced but no
+meaningful inbound energy arrived for several seconds after the callee was expected to
+speak, or the reverse. Codec and network behavior can cause false positives, so the alert
+asks for confirmation with a test call.
 
 ## 6. Logging
 
-Write one JSON object per line to stdout and let journald collect it; do not write application logs to
-the SD card. Each record carries `ts`, `level`, `event`, `call_id`, `slot_id`, `stage`, `duration_ms`,
-`attempt`, `outcome`, `error_code`, and `phone_masked` (for example `+91******3210`, showing at most the
-last four digits). No audio, transcripts, raw phone numbers, tokens, or SIM ICCIDs. If logs may be
-attached to public issues, mask all but the last four digits and prefer omitting the number entirely.
+Write one JSON object per line to stdout and let journald collect it. Each record carries
+`ts`, `level`, `event`, `call_id`, `slot_id`, `stage`, `duration_ms`, `attempt`,
+`outcome`, `error_code`, and `phone_masked` (for example `+91******3210`, showing at most
+the last four digits). No audio, transcripts, raw phone numbers, tokens, or SIM ICCIDs. If
+logs may be attached to public issues, mask all but the last four digits and prefer
+omitting the number entirely.
 
 ```ini
 # /etc/systemd/journald.conf.d/volatile.conf
@@ -177,60 +196,70 @@ RateLimitBurst=1000
 sudo systemctl restart systemd-journald
 ```
 
-The trade-off is explicit: volatile logs disappear on reboot or power loss, when a post-mortem is most
-useful. Ship the heartbeat and alert summaries off-box and keep a short call-outcome record in the state
-directory. For a specific crash, enable persistent storage temporarily, reproduce, then revert.
+Volatile storage is optional. On a desktop it reduces disk writes; on any host it means
+logs disappear on reboot or power loss, when a post-mortem is most useful. Ship the
+heartbeat and alert summaries off-box and keep a short call-outcome record in the state
+directory. For a specific crash, enable persistent storage temporarily, reproduce, then
+revert.
 
 ### Local call transcripts
 
-The agent can write a separate transcript for each call without putting transcripts in journald. Set
-`[transcript].enabled = true` in the agent configuration; the code default is off, and when off neither
-the directory nor a file is created. `[transcript].directory` defaults to
-`runtime/transcripts` relative to the process working directory.
+The agent can write a separate transcript for each call without putting transcripts in
+journald. Set `[transcript].enabled = true` in the agent configuration; the code default
+is off, and when off neither the directory nor a file is created.
+`[transcript].directory` defaults to `runtime/transcripts` relative to the process working
+directory.
 
 Each call gets one append-only, UTF-8 JSONL file named
-`YYYYmmddTHHMMSS-<short-id>.jsonl`. The directory is created with mode `0700` and files are mode
-`0600`. Every line has `ts` (ISO 8601 local wall-clock time with milliseconds), `call_id`, and
-`event`; current events are `call_start` (direction, full number, objective when non-empty,
-audio_backend, realtime_kind, and realtime model/voice for Grok), `transcript` (role `callee`,
-verbatim text), `reply` (role `agent`, verbatim text), and `call_end` (state, reason, turns,
-duration_s). Audio is never written.
+`YYYYmmddTHHMMSS-<short-id>.jsonl`. The directory is created with mode `0700` and files
+are mode `0600`. Every line has `ts` (ISO 8601 local wall-clock time with milliseconds),
+`call_id`, and `event`; current events are `call_start` (direction, full number, objective
+when non-empty, audio_backend, realtime_kind, and realtime model/voice for Grok),
+`transcript` (role `callee`, verbatim text), `reply` (role `agent`, verbatim text), and
+`call_end` (state, reason, turns, duration_s). Audio is never written.
 
-Unlike operational logs, the local transcript is intentionally complete and not redacted: it
-contains the full phone number, full conversation text, and call metadata. Operational stdout and
-journald logging remain masked. Treat transcript files as personal data. Keep them on the local
-device, readable only by the service user, and apply a retention or deletion policy appropriate to
-the deployment. They are excluded from git by the `runtime/` ignore rule, but do not include them in
-off-box backups unless the backup and retention policy explicitly covers call content. An I/O
-failure disables transcript writes for that call and logs a warning; it does not interrupt the call.
+Unlike operational logs, the local transcript is intentionally complete and **not
+redacted**: it contains the full phone number, full conversation text, and call metadata.
+Operational stdout and journald logging remain masked. Treat transcript files as personal
+data. Keep them on the local device, readable only by the service user, and apply a
+retention or deletion policy appropriate to the deployment. They are excluded from git by
+the `runtime/` ignore rule, but do not include them in off-box backups unless the backup
+and retention policy explicitly covers call content. An I/O failure disables transcript
+writes for that call and logs a warning; it does not interrupt the call.
 
-## 7. SD card wear
+## 7. Disk and host maintenance
 
-The card is the most likely consumable. Reduce writes:
+Keep enough free space for the OS, the runtime, and the journal. Reduce writes where it
+matters:
 
-- Keep journald volatile (RAM-only), disable swap (`sudo systemctl disable --now dphys-swapfile`; confirm
-  `swapon --show`), and use `noatime` on the root file system. If swap is unavoidable, use zram and
-  `vm.swappiness=10`.
-- Set `PYTHONDONTWRITEBYTECODE=1`, write state once per slot, never per audio frame, and never write
-  audio to disk.
-- Avoid persistent metrics databases and container images; use a reputable A1/A2 card and watch
-  `dmesg` for `mmc` I/O errors.
+- Keep journald volatile if the host uses a small SSD or SD card; otherwise a normal
+  persistent journal is fine.
+- Set `PYTHONDONTWRITEBYTECODE=1`, write state once per slot, never per audio frame, and
+  never write audio to disk.
+- Avoid persistent metrics databases and container images on a small host. Watch `dmesg`
+  for storage or I/O errors.
 
-Do not disable logging entirely; the goal is fewer writes, not blindness. Back up configuration, not
-logs or audio.
+Do not disable logging entirely; the goal is fewer writes, not blindness. Back up
+configuration, not logs or audio.
 
 ## 8. Updates
 
-Pin Raspberry Pi OS Lite 64-bit to a known release and record the kernel and firmware versions. Do not
-run `rpi-update` on production. Use a manual monthly window:
-`sudo apt update && sudo apt full-upgrade && sudo reboot`.
+Keep the Linux distribution, BlueZ, PipeWire, and WirePlumber on a known release. Apply
+security updates on a regular schedule and treat kernel, BlueZ, and PipeWire updates as
+maintenance-window work:
 
-After any kernel or firmware update, re-test gadget enumeration, the ALSA card, the audio loopback, and
-a real call. The `dwc2` controller and UAC gadget can change behavior across kernel versions; a
-configuration that worked before an update is not guaranteed to work after it. Verify on your device.
-Keep a known-good SD image; if an update breaks enumeration, swap in the previous card and investigate
-offline. Apply security updates more frequently, but treat kernel and firmware updates as
-maintenance-window work.
+```bash
+sudo apt update && sudo apt full-upgrade
+sudo reboot
+```
+
+After any Bluetooth, PipeWire, WirePlumber, or kernel update, re-test adapter roles, phone
+pairing, both SCO nodes during a call, and one real call. Role names and configuration
+syntax can change; a configuration that worked before an update is not guaranteed to work
+after it. Verify on your device.
+
+Keep the previous known-good package versions or a host snapshot where possible. If an
+update breaks the SCO link, roll back and investigate offline.
 
 ## 9. Security review
 
@@ -239,27 +268,31 @@ Run at installation, quarterly, and after suspected exposure.
 | Item | Check | Expected |
 |---|---|---|
 | SSH keys only | `sudo sshd -T \| grep -E 'passwordauthentication\|permitrootlogin\|pubkeyauthentication'` | `no`, `no`, `yes` |
-| Default passwords | `getent passwd pi`, `sudo passwd -S <user>` | No unused default; active accounts locked or strong |
+| Default passwords | `getent passwd`, `sudo passwd -S <user>` | No unused default; active accounts locked or strong |
 | Listening ports | `sudo ss -tlnp` | SSH and agent control only |
 | Firewall | `sudo ufw status verbose` or `sudo nft list ruleset` | Inbound denied except admin SSH |
 | LAN only | Query helper from outside the LAN | No response; no port forward |
-| Token permissions | `sudo stat -c '%a %U:%G' /etc/telephone-agent.env` | `640 root:<service-user>` |
+| Token permissions | `stat -c '%a %U:%G' <env-file>` | `600` or `640`, owner-only |
+| User services | `systemctl --user list-unit-files \| grep telephone` | Only the intended timer or inbound watcher enabled |
 
-Rotate the token with `openssl rand -hex 32`, update the phone app and Pi environment, restart both, and
-confirm the old token is rejected. Rotate immediately if a laptop or backup containing it is lost. Keep
-the helper on the LAN; the reference APK listens on all interfaces, so firewall port 8765 so only the Pi
-can reach it. Bind it to the private interface where the platform allows. Do not port-forward or tunnel
-it, and do not expose it over IPv6 without reviewing the firewall. Plain HTTP is acceptable only on a
-trusted LAN; use a separate VLAN or TLS on a shared network.
+Rotate the token with `openssl rand -hex 32`, update the phone app and host environment,
+restart both, and confirm the old token is rejected. Rotate immediately if a laptop or
+backup containing it is lost. Keep the helper on the LAN; the reference APK listens on all
+interfaces, so firewall port 8765 so only the host can reach it. Bind it to the private
+interface where the platform allows. Do not port-forward or tunnel it, and do not expose
+it over IPv6 without reviewing the firewall. Plain HTTP is acceptable only on a trusted
+LAN; use a separate VLAN or TLS on a shared network.
 
 ## 10. Monthly maintenance
 
 | Task | Method | Pass |
 |---|---|---|
 | Phone battery | Remove case, check for swelling or back-panel lift | No swelling |
-| Cable and port | Inspect for fraying, lint, bent pins | Clean, firm, no play |
-| Dust | Compressed air around vents and ports | Vents clear |
-| Logs | Heartbeat history; `sudo journalctl -u telephone-agent.service -b --no-pager \| grep -iE 'error\|warn'` | No recurring errors |
+| Charging cable and port | Inspect for fraying, lint, bent pins | Clean, firm, no play |
+| Bluetooth link | `./scripts/bluetooth-check.sh --idle "$BT_ADDRESS"` | Both roles and phone connected |
+| Dust | Compressed air around host vents and phone port | Vents clear |
+| Logs | `journalctl --user -u telephone-agent-bluetooth.service -b --no-pager \| grep -iE 'error\|warn'` | No recurring errors |
+| Inbound service | `systemctl --user status telephone-agent-inbound.service` | Active when inbound is enabled |
 | Disk | `df -h /`, `df -i /` | Below 80% |
 | Provider balance | Provider console | Credit and expiry adequate |
 | Test call | Documented test path | Two-way audio, clean hangup |
@@ -268,53 +301,61 @@ Record each result. A maintenance log turns "it worked last month" into evidence
 
 ## 11. Capacity and scale
 
-One Pi controls one phone and one call at a time: the gadget has a single audio function and the phone
-routes one cellular call to it. Parallel calls on one gadget produce mixed or missing audio.
+One host controls one phone and one call at a time: the HFP link is point-to-point and the
+phone routes one cellular call to it. Parallel calls on one phone produce mixed or missing
+audio.
 
-To call multiple numbers, use sequential slots with enough separation for idle, or one phone and one Pi
-per number, each with its own SIM and caller ID. A PSTN or SIP gateway is outside scope. The Pi Zero 2 W
-runs the audio bridge and a cloud-backed pipeline but not comfortable local speech models. A Pi 4 Model B
-2 GB is the supported alternative for Ethernet and local experiments; the Pi 5 cannot act as a USB
-device. Do not centralize audio from multiple households on one Pi; centralize only alerts and summaries.
+To call multiple numbers, use sequential slots with enough separation for idle, or one
+phone and one host per number, each with its own SIM and caller ID. A PSTN or SIP gateway
+is outside scope. The host runs the audio bridge and a cloud-backed pipeline. Local speech
+models need more CPU and RAM than the reference laptop and remain a stretch goal. Do not
+centralize audio from multiple households on one host; centralize only alerts and
+summaries.
 
 ## 12. Incident severity
 
 | Severity | Definition | Examples | Target |
 |---|---|---|---|
-| S1 | No successful call for 3 consecutive days, or safety impact | Dead gadget, offline phone, provider outage, repeated silent calls | Acknowledge 4 h, restore 24 h |
+| S1 | No successful call for 3 consecutive days, or safety impact | Dead Bluetooth adapter, offline phone, provider outage, repeated silent calls | Acknowledge 4 h, restore 24 h |
 | S2 | Degraded or repeated single-day failure | One-way audio, latency > 2 s, wrong SIM, call < 20 s | Acknowledge 24 h, fix 72 h |
 | S3 | Cosmetic or non-urgent | Log formatting, docs, one transient warning | Next monthly window |
 
-Use the [runbook](./runbook.md). For S1, make a manual call from an ordinary phone if the agent cannot
-be restored quickly.
+Use the [runbook](./runbook.md). For S1, make a manual call from an ordinary phone if the
+agent cannot be restored quickly.
 
 ## 13. Backup and recovery
 
-Back up configuration, not logs or audio: `/etc/telephone-agent.toml`, `/etc/telephone-agent.env` (encrypt the archive; it holds the helper token and API keys), systemd units, and OS, kernel, and firmware versions.
+Back up configuration, not logs or audio: the agent TOML, the environment file (encrypt the
+archive; it holds the helper token and API keys), the systemd user units, and the installed
+BlueZ, PipeWire, and WirePlumber versions.
 
 ```bash
-sudo tar -C / -czf /root/telephone-agent-config-$(date +%F).tar.gz \
-  etc/telephone-agent.toml etc/telephone-agent.env \
-  etc/systemd/system/telephone-agent.service \
-  etc/systemd/system/telephone-agent.timer \
-  etc/systemd/system/uac-gadget.service
+tar -C "$HOME" -czf "$HOME/telephone-agent-config-$(date +%F).tar.gz" \
+  android-telephone-agent/config/config.toml \
+  android-telephone-agent/.env \
+  .config/systemd/user/telephone-agent-bluetooth.service \
+  .config/systemd/user/telephone-agent-bluetooth.timer \
+  .config/systemd/user/telephone-agent-inbound.service \
+  .config/wireplumber/wireplumber.conf.d/51-bt-headset.conf
 ```
 
-Keep the archive off the Pi and out of git; it contains the token and possibly API keys. Take a full SD
-image after a successful test call, label it with date and kernel, and store a spare card with the same
-image. Confirm the card device with `lsblk` before reading or writing it.
+Keep the archive off the host and out of git; it contains the token and possibly API keys.
+Also record the Bluetooth address, the phone model, and the adapter model so a replacement
+host can be paired.
 
-Spares: one USB-C hub with PD passthrough, one USB-C to USB-C cable, one USB-A to micro-USB cable, one
-25 W charger, and one prepared microSD card.
+Spares: one phone charger and USB-C cable, and a second phone if the agent SIM can be moved
+quickly. A spare host is optional but reduces recovery time.
 
-Recovery: power off; reflash or replace the card with the known-good image; restore configuration and token; boot
-and wait for time sync; confirm gadget enumeration, the UAC card, and phone reachability; place a test
-call with two-way audio; record the date and cause. With a prepared card this takes under 30 minutes.
+Recovery: restore the configuration and token; install BlueZ, PipeWire, and WirePlumber;
+install the WirePlumber fragment; pair and trust the phone; enable the user timer or the
+inbound watcher; wait for time sync; run the idle Bluetooth check, then place a supervised
+test call with two-way audio. Record the date and cause.
 
 ## Related documents
 
-[Hardware](./hardware.md), [Raspberry Pi setup](./raspberry-pi-setup.md),
-[Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md), [runbook](./runbook.md),
+[Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md),
+[Inbound calls](./inbound.md), [runbook](./runbook.md),
 [troubleshooting](./troubleshooting.md), the
-[service unit](../scripts/systemd/telephone-agent.service), and the
-[timer](../scripts/systemd/telephone-agent.timer).
+[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), the
+[Bluetooth timer](../scripts/systemd/telephone-agent-bluetooth.timer), and the
+[inbound user service](../scripts/systemd/telephone-agent-inbound.service).

@@ -1,8 +1,8 @@
 # Telephone agent runtime
 
 This directory contains the reference Python runtime for the telephone voice agent
-described in the [design brief](../docs/design-brief.md). It runs on the
-Raspberry Pi next to Phone A, captures and plays call audio through a Bluetooth
+described in the [design brief](../docs/design-brief.md). It runs on the Linux
+host next to Phone A, captures and plays call audio through a Bluetooth
 HFP SCO link managed by PipeWire, and asks a small LAN helper to place, answer,
 and end the cellular call. Outbound calls are placed by the agent; inbound calls
 are detected by polling the helper and are answered automatically.
@@ -17,9 +17,9 @@ below explain where the pieces belong.
 
 ## Prerequisites
 
-- Raspberry Pi Zero 2 W or Pi 4 Model B running Raspberry Pi OS Lite 64-bit
-  (Bookworm or later), or another Linux host, with PipeWire and WirePlumber in
-  the user session that runs the agent.
+- A Linux host running BlueZ, PipeWire, and WirePlumber in the user session that
+  runs the agent. A laptop, desktop, or mini PC works. The validated host was an
+  Ubuntu laptop with onboard Bluetooth.
 - Python 3.11 or later. Check with `python3 --version`.
 - PipeWire, WirePlumber, and the PipeWire command-line tools `pw-record`,
   `pw-play`, and `pw-dump`, plus `bluetoothctl` for pairing and link checks. On
@@ -57,10 +57,10 @@ change between connections.
 
 ## Install
 
-For a production install on the Pi, use a virtual environment inside `agent/`:
+For a production install on the host, use a virtual environment inside `agent/`:
 
 ```bash
-cd /home/pi/android-telephone-agent/agent
+cd "$HOME/android-telephone-agent/agent"
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
@@ -546,71 +546,22 @@ Caveats:
 
 ## systemd
 
-The one-shot `run` command places one call and exits, so use a systemd timer rather
-than `Restart=always`. Restarting a command that dials would redial after every exit.
-The timer is the scheduler in v0; `agent.schedule` in the TOML file is reserved for a
-future scheduler and is not read. The `serve` command is the long-lived alternative and
-should run as a normal service if you use the control plane instead of the timer.
+The one-shot `run` command places one call and exits, so use a systemd **user** timer
+rather than `Restart=always`. Restarting a command that dials would redial after every
+exit. The timer is the scheduler in v0; `agent.schedule` in the TOML file is reserved for
+a future scheduler and is not read. The `serve` command is the long-lived alternative and
+should run as a normal user service if you use the control plane instead of the timer.
 
-Place the units in `/etc/systemd/system/` and adjust `User`, paths, and the
-schedule for your installation. `User=pi` is the common Raspberry Pi OS account;
-verify it exists on your image.
-
-```ini
-[Unit]
-Description=telephone-agent one outbound call
-Wants=network-online.target sound.target
-After=network-online.target sound.target
-
-[Service]
-Type=oneshot
-User=pi
-Group=pi
-SupplementaryGroups=audio
-WorkingDirectory=/home/pi/android-telephone-agent/agent
-EnvironmentFile=-/home/pi/android-telephone-agent/.env
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/pi/android-telephone-agent/agent/.venv/bin/telephone-agent --config /home/pi/android-telephone-agent/config/config.toml run
-TimeoutStartSec=900
-```
-
-```ini
-[Unit]
-Description=telephone-agent daily call
-
-[Timer]
-OnCalendar=*-*-* 09:00:00
-Persistent=false
-RandomizedDelaySec=30
-
-[Install]
-WantedBy=timers.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now telephone-agent.timer
-systemctl list-timers telephone-agent.timer
-journalctl -u telephone-agent.service -n 100 --no-pager
-```
-
-The unit runs as `pi`; that user must have read access to the configuration and
-environment files. `EnvironmentFile` is optional (`-` prefix), so the service
-still starts if you use only the TOML file.
-
-### Bluetooth HFP: use a user service
-
-The unit above is a system service, even though it runs as `pi`. It will not
-work unchanged for the Bluetooth path: PipeWire and WirePlumber run in the
-user's session, and a system service has a different session bus and
-`XDG_RUNTIME_DIR`. Run the agent as a systemd **user** service in the same
-account that owns the PipeWire session.
+PipeWire and WirePlumber run in the user session. A system service, even one that runs as
+the same account, has a different session bus and `XDG_RUNTIME_DIR` and cannot see the
+SCO nodes. Run the agent as a systemd **user** service in the account that owns the
+PipeWire session.
 
 The repository ships user units in `scripts/systemd/`:
-`telephone-agent-bluetooth.service` and `telephone-agent-bluetooth.timer`.
-They assume the repository is at `~/android-telephone-agent`; edit the
-`%h`-based paths (`WorkingDirectory`, `EnvironmentFile`, and `ExecStart`) if it is
-elsewhere. Install them under the user unit directory and enable the timer:
+`telephone-agent-bluetooth.service` and `telephone-agent-bluetooth.timer`. They assume the
+repository is at `~/android-telephone-agent` and use the `agent/.venv` console script;
+edit the `%h`-based paths (`WorkingDirectory`, `EnvironmentFile`, and `ExecStart`) if yours
+are elsewhere. Install them under the user unit directory and enable the timer:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -637,10 +588,10 @@ Inbound and outbound calls are mutually exclusive: do not enable the inbound
 unit together with an outbound timer on the same phone. Installation and
 privacy limits are in [Inbound calls](../docs/inbound.md).
 
-The design brief targets 24/7 operation with a hardware watchdog and volatile
-journald storage. Those are host-level settings; the one-shot unit above does
-not enable them. Do not add `Restart=always` until a scheduler guarantees one
-call per slot and idempotent retries.
+The design brief targets 24/7 operation with a host watchdog and optional volatile
+journald storage. Those are host-level settings; the one-shot user unit does not enable
+them. Do not add `Restart=always` until a scheduler guarantees one call per slot and
+idempotent retries.
 
 ## Testing
 
@@ -706,16 +657,17 @@ workflow runs `ruff check` and `pytest` on Python 3.11, 3.12, and 3.13. Python
   call. A system service without access to that session cannot use the audio
   path.
 - **Bluetooth validation is limited.** The path was validated on a Linux laptop
-  with a Galaxy A23 and a Google Meet call. A PSTN call over Bluetooth and the Pi
-  Zero 2 W were not tested; the Pi is expected to work but is unverified.
+  with a Galaxy A23 and outbound PSTN calls. Live inbound PSTN calls and latency
+  have not been validated. The link was weak (RSSI about -87 dBm); the first call
+  dropped during setup and needed a manual reconnect, and later calls were stable.
 - **No HFP call control.** The agent does not send `ATD`, `ATA`, or `CHUP`.
   Dialing and hangup still require the LAN helper and a reachable phone.
 - **The cellular codec caps fidelity.** AMR-NB, AMR-WB, or EVS quality is the
   limit regardless of the SCO link's 16 kHz mSBC rate. Optimise for turn-taking
   and latency, not hi-fi.
-- **Pi Zero 2 W is CPU constrained.** Local speech models are not comfortable on
-  this board; the design brief treats Whisper/Piper-class local models as a
-  Pi 4/5 stretch goal.
+- **Local speech models need a larger host.** Local speech models are not
+  comfortable on a low-power machine; the design brief treats Whisper/Piper-class
+  local models as a stretch goal for a desktop or mini PC.
 
 ## Troubleshooting
 
@@ -746,7 +698,7 @@ journalctl --user -u telephone-agent-bluetooth.service -n 100 --no-pager
 | High latency | Non-streaming brain and TTS wait for complete responses. See the streaming notes and the design brief's latency budget. |
 
 If `doctor` passes but audio still fails, verify the Android-side routing first;
-the Pi can only testify about its own PipeWire path.
+the host can only testify about its own PipeWire path.
 
 ## Security and privacy
 

@@ -1,166 +1,165 @@
 # Troubleshooting
 
-Setup-phase and early-operation problems, grouped by layer. Each entry gives the symptom, likely cause,
-a check, and a fix. Run commands on the Pi unless stated otherwise, and verify device-specific behavior
-on your device.
+Setup-phase and early-operation problems, grouped by layer. Each entry gives the symptom,
+likely cause, a check, and a fix. Run commands on the Linux host unless stated otherwise,
+and verify device-specific behavior on your device.
 
-Related: [Raspberry Pi setup](./raspberry-pi-setup.md), [Android setup](./android-setup.md),
-[hardware](./hardware.md), [operations](./operations.md), [runbook](./runbook.md), and the
-[service unit](../scripts/systemd/telephone-agent.service).
+Related: [Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md),
+[Inbound calls](./inbound.md), [operations](./operations.md), [runbook](./runbook.md), the
+[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), and the
+[inbound user service](../scripts/systemd/telephone-agent-inbound.service).
 
-For the Bluetooth HFP alternative, start with [Bluetooth HFP](./bluetooth-hfp.md). The
-USB enumeration and ALSA sections below apply to the UAC1 gadget; Bluetooth failures are
-diagnosed with `bluetoothctl`, `pw-dump`, and the WirePlumber journal instead. For
-inbound-answer failures, including `/answer` 403/409/500, ringing with no SCO nodes, and
-the inbound service not starting, see the existing table in
+For inbound-answer failures, including `/answer` 403/409/500, ringing with no SCO nodes,
+and the inbound service not starting, see the table in
 [Inbound calls](./inbound.md#limits-and-troubleshooting) and the inbound rows in
 [Bluetooth HFP](./bluetooth-hfp.md#11-troubleshooting).
 
-Work from the bottom of the stack upward: power, USB enumeration, ALSA, Android routing, helper, network,
-agent. A fault at a lower layer produces misleading errors at every layer above it. Change one thing at
-a time and re-test with a loopback or a supervised call after each change.
+Work from the bottom of the stack upward: power, Bluetooth adapter, HFP link and SCO
+nodes, PipeWire, Android routing, helper, network, agent. A fault at a lower layer produces
+misleading errors at every layer above it. Change one thing at a time and re-test with the
+Bluetooth check, an audio test, or a supervised call after each change.
 
 ## 1. Hardware and power
 
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
-| Pi does not boot; no green activity | Insufficient power, bad card, broken boot file | Red power LED, green LED, console output, `vcgencmd get_throttled` at console | Use a 5 V/2 A supply on the PWR port, reseat or reflash the card, restore `config.txt` |
-| `Under-voltage detected` in `dmesg` | Hub port or cable cannot supply peak current | `vcgencmd get_throttled` (bit 0), `dmesg \| grep -i voltage` | Power the Pi from PWR, shorten the cable, use a rated hub or supply |
-| Hub passes power but no data | Charge-only hub or cable, or wrong hub port | Phone does not show the gadget; test a USB-C earphone through the hub | Replace with a data-capable hub, use the data port, try another cable |
-| Phone says "USB device not supported" | Gadget descriptor or UAC profile not accepted, or power fault | `dmesg` on the Pi, phone notification, try UAC2 | Verify the gadget script and UAC1 profile; test UAC2; try another cable and port |
+| Host does not boot | Power, disk, or boot configuration | Power LED, console output, `df -h /`, `journalctl -b -p err` | Restore power, free disk space, or restore the host from backup |
+| Bluetooth adapter missing | Adapter disabled, unplugged, or driver not loaded | `bluetoothctl list`, `dmesg \| grep -i blue`, `rfkill list` | Enable the adapter, unblock rfkill, or use another adapter |
+| Phone battery falls over days | Charger, cable, or port problem | Phone battery screen, `adb shell dumpsys battery`, inspect the port | Replace the cable or charger, clean the port, remove the case |
+| Phone shuts down overnight | Battery health or charging failure | Battery health screen, charging state over a day | Replace the battery or phone; do not rely on a failing device |
 
-The Pi Zero 2 W draws roughly 150-300 mA typical and up to about 400 mA peak. A hub port that is fine
-for a keyboard may still brown out during Wi-Fi transmission. If the Pi reboots when the radio is busy,
-suspect power before software. The phone is a power sink and never sources VBUS to the gadget.
+The phone is a power sink and charges from its own USB charger. Bluetooth is the audio
+link, so the USB port is not occupied by an audio device. Use a charger and cable that the phone
+accepts; a charge-only cable is fine.
 
-The phone expects a USB audio class device. A charge-only cable or a hub that does not pass data
-downstream will never enumerate, no matter how the gadget is configured. Test the hub with a known USB
-device before changing gadget settings.
-
-## 2. USB enumeration
+## 2. Bluetooth link
 
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
-| `UDC` missing or empty | Gadget unit failed, `dwc2` overlay absent, configfs error | `ls /sys/kernel/config/usb_gadget/`, `cat .../agent/UDC`, `systemctl status uac-gadget.service` | Restart the unit; confirm `dtoverlay=dwc2,dr_mode=peripheral` and `modules-load=dwc2,libcomposite` |
-| Phone sees a device but no audio card | UAC function not bound, descriptor rejected | `cat /proc/asound/cards`, `dmesg \| grep -iE 'uac\|g_audio\|configfs'` | Re-run the gadget script, check the function name, reboot and retest |
-| UAC1 works on one phone, not another | Vendor UAC support differs | Test the same gadget on both phones; try UAC2 | Keep UAC1 as default; use UAC2 only if the phone enumerates and routes audio |
-| ALSA card number changes between boots | Multiple sound cards or enumeration order | `arecord -l`, `aplay -l` | Address the card by name with `plughw:CARD=<name>,DEV=0`, never `hw:1,0` |
+| `bluetoothctl show` has no Headset or Handsfree UUID | WirePlumber fragment not loaded, wrong path, or overridden | `systemctl --user status wireplumber`, `journalctl --user -u wireplumber -b` | Install the fragment with `scripts/bluetooth-setup.sh`, restart WirePlumber, re-check |
+| Phone pairs but does not connect | Device not trusted, out of range, or adapter reset | `bluetoothctl info <address>`, `bluetoothctl connect <address>` | Trust the device, move closer, reconnect, and verify before the next slot |
+| Phone connects but **Calls and audio** is off | HFP call-audio profile not enabled | Phone Bluetooth device details | Enable **Calls and audio**, toggle Bluetooth, or re-pair |
+| Call audio stays on the earpiece | Phone selected the wrong route, or HFP is not connected | Phone call screen, `bluetoothctl info <address>`, `pw-dump` | Select Bluetooth on the call screen, reconnect, retry the call |
+| SCO nodes missing during a call | Call is not routed to Bluetooth, HFP link is down, or agent is in another user session | `scripts/bluetooth-check.sh <address>`, `pw-dump` | Fix the route or pairing; run the agent in the PipeWire user session |
+| Codec is CVSD, not mSBC | Phone or adapter did not negotiate wideband | `scripts/bluetooth-check.sh <address>` during a call, `wpctl inspect <node-id>` | No fix if unsupported; the call still works at 8 kHz |
+| Link drops during setup | Weak signal, 2.4 GHz interference, or adapter reset | RSSI in `bluetoothctl info`, `iw dev wlan0 link`, distance | Move the phone and host closer, change the Wi-Fi channel, reconnect manually |
+| Pairing lost after phone reboot | Device not trusted, or the phone did not reconnect | `bluetoothctl info <address>` | Trust the device and connect once before the next scheduled call |
 
-UAC1 is preferred because Android compatibility is broader. UAC2 is a fallback, not an upgrade: some
-phones enumerate it but route call audio incorrectly or not at all. Verify both playback and capture on
-your device before changing the default.
+SCO nodes exist only while a call is active; their absence while idle is normal. A stale
+bond can keep the old profile set after the WirePlumber fragment changes. Remove the pairing
+on both sides and pair again.
 
-Card order is not stable when other USB audio devices, HDMI audio, or a codec HAT are present. A
-configuration that uses `hw:1,0` can silently capture from the wrong device after a reboot. Use the
-stable card name shown by `arecord -l` and confirm it after every kernel update.
-
-## 3. ALSA
+## 3. PipeWire
 
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
-| `arecord: device busy` | Agent holds the device, or PulseAudio/PipeWire is using it | `sudo fuser -v /dev/snd/*`, `sudo lsof /dev/snd/*` | Stop the agent before testing; do not run two captures; disable audio servers on a headless image |
-| Capture opens but contains silence | Wrong card or device, muted input, phone route wrong | `arecord -l`, `amixer -c <card> controls`, loopback test | Correct the device name, unmute if a control exists, reseat and retest |
-| Playback runs but callee hears nothing | Playback sent to the wrong PCM, or phone did not route the call | `aplay -l`, loopback test, phone call route | Match the gadget playback device; confirm the phone uses USB audio for the call |
-| Silence in one direction | Routing inversion, wrong PCM, or phone route | Loopback test, `arecord` level, phone call route | Correct the device, confirm the phone uses USB audio, and test each direction separately |
-| Echo or feedback | Local monitoring loop, speaker coupling, or duplicate audio path | Check for `arecord \| aplay`, phone speaker volume, open streams | Remove local monitoring, use the headset route, lower gain, enable echo cancellation |
+| `pw-record` or `pw-play` not found | PipeWire tools not installed | `command -v pw-record pw-play pw-dump` | Install the distribution's PipeWire tools package (for example `pipewire-bin`) |
+| `pw-dump` cannot connect | Agent runs as root or another user; no user session | `id`, `systemctl --user status pipewire`, `echo "$XDG_RUNTIME_DIR"` | Run as the PipeWire user, use a user service, enable lingering |
+| Node target not found after reconnect | The `.<id>` suffix changed | `pw-dump`, `wpctl status` | Discover by `api.bluez5.address` and `factory.name`; do not hard-code `.0` or `.1` |
+| One direction has no node | Incomplete SCO set, or the phone route changed | `scripts/bluetooth-audio-test.sh list` | Reconnect, confirm the call route, and retry during the call |
+| `pw-record` exits nonzero after `--sample-count` | Known PipeWire 1.6.2 behavior when the WAV is complete | Validate the WAV, check its size and duration | Keep the valid file; the audio test script already handles this |
+| Stream plays to the host speaker instead of the call | Wrong target node or missing explicit target | `media.class` and node name in `pw-dump` | Target the `bluez_output` SCO sink for uplink; do not use the default sink |
 
-Remember the direction inversion: `aplay` to the gadget sends audio to the phone's microphone input, so
-the remote party hears it. `arecord` from the gadget receives what the phone would play in its earpiece.
-A test that assumes a normal sound card will diagnose the wrong direction.
-
-`arecord: device busy` during setup usually means the agent is already running. Stop
-`telephone-agent.service` before a manual loopback, and start it again afterward. If no agent is running,
-find the holder with `fuser` or `lsof` before killing anything.
+PipeWire and WirePlumber run per user. A system service, a different account, or a root
+shell does not share that session and cannot see the SCO nodes.
 
 ## 4. Android routing
 
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
-| Call audio comes from the earpiece | Phone did not route to USB, or enumerated after the call | Phone call screen, `cat /proc/asound/cards`, Bluetooth state | Connect the gadget before dialing, disable Bluetooth for the USB path, confirm USB audio routing is enabled, reboot the phone |
+| Call audio comes from the earpiece | Phone did not route to Bluetooth, or HFP is not connected | Phone call screen, `bluetoothctl info <address>`, `dumpsys audio` | Confirm **Calls and audio**, reconnect, reboot the phone if the route is stuck |
 | Samsung SIM picker appears | Helper did not pass the phone account handle, or no default SIM | SIM manager, helper logs, `/health` SIM label | Set the default calling SIM and pass `EXTRA_PHONE_ACCOUNT_HANDLE` |
 | Helper notification is missing | Android 13+ notification permission denied | Settings > Apps > helper > Notifications | Grant notification permission; the foreground service needs a visible notification |
 | Helper is killed after hours | Battery optimization or One UI sleeping apps | Settings > Battery > Background usage limits | Set Unrestricted, remove from sleeping lists, lock in recents |
 | No cellular signal or SIM out of credit | Coverage, account balance, SIM disabled | Phone status bar, carrier balance or USSD, SIM manager | Move the phone near a window, top up, enable the SIM, retry a supervised call |
+| Phone rings but no SCO audio | SCO nodes appear only after answer, or the route stayed local | `GET /state`, phone call screen, `pw-dump` | Answer through `POST /answer`, confirm **Calls and audio**, check during the call |
 
-Developer options > Disable USB audio routing must be OFF. If it is ON, Android ignores the USB audio
-device for calls even though the gadget enumerates. The setting is easy to toggle while debugging and
-easy to forget.
-
-On Samsung dual-SIM devices, the SIM picker is a routing failure, not a cosmetic prompt. An unattended
-call cannot answer it. Pass the correct `TelecomManager` account handle and verify the caller ID on a
-supervised test call. Behavior varies by One UI version; verify on your device.
+On Samsung dual-SIM devices, the SIM picker is a routing failure, not a cosmetic prompt. An
+unattended call cannot answer it. Pass the correct `TelecomManager` account handle and
+verify the caller ID on a supervised test call. Behavior varies by One UI version; verify
+on your device.
 
 ## 5. Helper app
 
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
 | `/health` unreachable | Helper killed, wrong IP, Wi-Fi down, firewall | `ping "$PHONE_HOST"`, `curl -v http://$PHONE_HOST:8765/health` | Restart the app, confirm the reserved address, check the phone's Wi-Fi |
-| HTTP 401 on call control | Token mismatch after rotation | Agent log, `/etc/telephone-agent.env`, app settings | Update the token on both sides, restart the helper and agent |
+| HTTP 401 on call control | Token mismatch after rotation | Agent log, host environment file, app settings | Update the token on both sides, restart the helper and agent |
 | Port 8765 already in use | Old helper instance or another service | `ss -tlnp \| grep 8765` on a Linux helper host, or the app's diagnostics screen | Stop the old instance; or rebuild for another port and update the agent URL |
 | Helper works, calls do not | `CALL_PHONE` denied, SIM account invalid | App permissions, SIM manager, helper logs | Grant the permission, correct the SIM label, retest |
+| `/call` returns `409` | A call is ringing or active, inbound or outbound | `GET /state`, phone UI | End the call or wait for idle; inbound and outbound are serialized |
+| `/answer` returns `403` | `ANSWER_PHONE_CALLS` missing or Android denied the answer | Helper log, app permissions | Grant the permission, unlock the phone, retry a supervised call |
+| `/answer` returns `409` | The call stopped ringing or was answered manually | `GET /state` | Expected race; do not retry |
+| `/answer` returns `500` | Android threw while answering | Helper log, `adb logcat -s DialHelper` | Unlock the phone, check vendor restrictions |
 
-The helper is a foreground service with a battery exemption. If the phone reports the app as inactive,
-the endpoint will time out even though the phone is on the network. Treat a health failure as a helper
-problem until ping and HTTP prove otherwise.
+The helper is a foreground service with a battery exemption. If the phone reports the app
+as inactive, the endpoint will time out even though the phone is on the network. Treat a
+health failure as a helper problem until ping and HTTP prove otherwise.
 
-Port 8765 is the reference helper's fixed listening port. If another service uses it, stop the old
-instance, or rebuild the helper on a free port and update the agent URL; the two must match.
+Port 8765 is the reference helper's fixed listening port. If another service uses it, stop
+the old instance, or rebuild the helper on a free port and update the agent URL; the two
+must match.
 
 ## 6. Scheduling
 
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
 | Call fires at the wrong hour | Wrong system time zone or a fixed offset in code | `timedatectl`, `systemd-analyze calendar '*-*-* 08:00:00 Asia/Kolkata'` | Set `Asia/Kolkata`, use IANA zones in code, reload the timer |
-| Timer never fires | Unit disabled, bad `OnCalendar`, timer not started | `systemctl list-timers --all \| grep telephone`, `systemctl status <timer>` | Fix the expression, `daemon-reload`, enable and start the timer |
+| Timer never fires | Unit disabled, bad `OnCalendar`, timer not started, or user manager stopped | `systemctl --user list-timers --all \| grep telephone`, `systemctl --user status <timer>` | Fix the expression, `systemctl --user daemon-reload`, enable and start the timer |
+| Timer fires only while logged in | Lingering not enabled for the user | `loginctl show-user "$USER" \| grep Linger` | `sudo loginctl enable-linger "$USER"` |
 | Call fires late after boot | `Persistent=true` or catch-up logic | Timer unit, application state | Set `Persistent=false`, enforce a grace window and quiet hours |
-| Clock is wrong after a power cut | NTP skew; no RTC | `timedatectl`, `timedatectl timesync-status` | Wait for sync before calls; enable a time-sync wait; check router NTP |
+| Clock is wrong after a power cut | NTP skew; host has no RTC | `timedatectl`, `timedatectl timesync-status` | Wait for sync before calls; enable a time-sync wait; check router NTP |
 
-The Pi Zero 2 W has no battery-backed clock. A boot after a power cut can be minutes off until NTP
-succeeds. Certificate validation and provider request signing then fail in ways that look like expired
-keys or provider outages.
+A host without a battery-backed clock, or one that has just booted after a power cut, can be
+minutes off until NTP succeeds. Certificate validation and provider request signing then
+fail in ways that look like expired keys or provider outages.
 
-Do not compensate with a fixed `+05:30` offset. India has no daylight saving time today, but the code
-must remain correct for other zones and for future rule changes. Use `zoneinfo` and store log timestamps
-with an explicit offset.
+Do not compensate with a fixed `+05:30` offset. India has no daylight saving time today,
+but the code must remain correct for other zones and for future rule changes. Use
+`zoneinfo` and store log timestamps with an explicit offset.
 
 ## 7. Agent and network
 
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
-| Wi-Fi drops during calls | Weak signal, 2.4 GHz interference, power save | `iw dev wlan0 link`, `ping -c 100 <gateway>`, `dmesg` | Move closer to the AP, change channel, disable power save, use Ethernet on a Pi 4 |
+| Wi-Fi drops during calls | Weak signal, 2.4 GHz interference, power save | `iw dev wlan0 link`, `ping -c 100 <gateway>`, `dmesg` | Move closer to the AP, change channel, disable power save, use Ethernet for the host |
 | Provider unreachable | DNS, egress firewall, wrong endpoint, expired key | `getent hosts`, `curl -v`, `date -Is` | Fix DNS or egress, correct the endpoint, rotate the key |
-| Calls connect but the agent is slow | Provider latency, packet loss, CPU load | `top`, `ping`, journal stage durations | Reduce load, switch region, improve Wi-Fi, check cooling |
-| Port 8765 in use on the Pi | Local control service conflict | `sudo ss -tlnp \| grep 8765` | Stop the conflicting process or change the port in both configs |
+| Calls connect but the agent is slow | Provider latency, packet loss, CPU load, Bluetooth retransmission | `top`, `ping`, journal stage durations, `scripts/bluetooth-check.sh` | Reduce load, switch region, improve Wi-Fi or Bluetooth proximity, check host cooling |
+| Port 8765 in use on the host | Local control service conflict | `sudo ss -tlnp \| grep 8765` | Stop the conflicting process or change the port in both configs |
+| Agent exits at startup | Configuration error, missing token, or missing audio tools | `telephone-agent doctor`, journal | Fix the named key, token, or package |
+| Agent cannot see SCO nodes | Running outside the PipeWire user session | `systemctl --user status pipewire wireplumber`, `echo "$XDG_RUNTIME_DIR"` | Use the user service and enable lingering |
 
-A 2.4 GHz-only Pi Zero 2 W is sensitive to microwave ovens, cordless phones, and crowded channels.
-Packet loss shows up as STT retries and clipped TTS, not as an obvious network error. Measure before
+Wi-Fi and Bluetooth share the 2.4 GHz band. Packet loss or SCO retransmission shows up as
+STT retries, clipped TTS, or dropouts, not as an obvious network error. Measure before
 changing provider settings.
 
-If the clock is wrong, fix time before rotating keys. A valid key can fail with a signature error when
-the local clock is outside the provider's tolerance. Confirm `timedatectl` shows synchronized and the
-correct zone.
+If the clock is wrong, fix time before rotating keys. A valid key can fail with a signature
+error when the local clock is outside the provider's tolerance. Confirm `timedatectl` shows
+synchronized and the correct zone.
 
 ## 8. Audio quality
 
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
-| Echo on the call | Acoustic coupling or a local playback-to-capture loop | Look for `arecord \| aplay`, check speaker volume and open streams | Remove monitoring, use the headset route, lower gain, enable echo cancellation |
-| Clipping or distortion | Playback gain too high or capture overloaded | `arecord` a sample, inspect with `sox ... stat` if available | Reduce TTS or playback gain, add headroom, avoid boosting in ALSA |
-| Dropouts and crackle | ALSA buffer underruns, CPU starvation, power | `dmesg \| grep -i xrun`, `top`, `vcgencmd get_throttled` | Increase buffers, stop background work, fix power or cooling |
-| Volume too low | Phone in-call volume or gadget gain | Phone volume, `amixer` controls, test recording level | Raise the phone call volume, adjust gain, confirm the correct device |
+| Echo on the call | Far-end speakerphone or a network echo path | Ask the far end to use a handset, check the phone route and open streams | Use a handset or headset at the far end; keep the barge-in guard |
+| Clipping or distortion | Playback gain too high or capture overloaded | Record the downlink, inspect RMS/dBFS with `selftest` or `sox ... stat` | Reduce TTS or playback gain, add headroom |
+| Dropouts and crackle | Bluetooth retransmission, Wi-Fi coexistence, CPU starvation | `pw-top`, `iw dev wlan0 link`, `top` | Move closer, change channel, stop background work |
+| Volume too low | Phone in-call volume or SCO gain | Phone call volume, `wpctl` volume for the SCO node | Raise the phone call volume, adjust gain |
+| One direction silent | Wrong node mapping or phone route | `scripts/bluetooth-audio-test.sh record` and `tone` | Fix the route or target; downlink is `bluez_input`, uplink is `bluez_output` |
 
-The cellular codec caps fidelity regardless of the gadget's 48 kHz rate. Do not chase hi-fi; chase
-intelligibility and stable turn-taking. A clean 16 kHz speech path sounds better on a call than a
-clipped 48 kHz one.
+The cellular codec caps fidelity regardless of the SCO rate. Do not chase hi-fi; chase
+intelligibility and stable turn-taking. A clean 16 kHz speech path sounds better on a call
+than a clipped or delayed one.
 
-Echo is usually acoustic or a monitoring loop, not a codec defect. Confirm that the Pi is not playing
-its capture back to the gadget and that the phone is not using its speaker alongside the USB route.
+Echo is usually acoustic at the far end or a network reflection. Confirm that the host is
+not playing its capture back to the SCO sink and that the phone is not using its speaker
+alongside the Bluetooth route.
 
 ## Collect diagnostics
 
-Run this on the Pi and attach the output to an issue. It is designed to avoid tokens, audio, and full phone
-numbers, but review it before sharing; do not add `env`, configuration files, or the environment file. Run
-`sudo -v` first so a password prompt does not corrupt the capture.
+Run this on the host and attach the output to an issue. It is designed to avoid tokens,
+audio, and full phone numbers, but review it before sharing; do not add `env`, configuration
+files, or the environment file.
 
 ```bash
 #!/bin/sh
@@ -169,34 +168,33 @@ out="${HOME}/telephone-agent-diag-$(date +%Y%m%d-%H%M%S).txt"
   echo "== date =="; date -Is
   echo "== os =="; cat /etc/os-release; uname -a
   echo "== uptime =="; uptime
-  echo "== power =="; vcgencmd get_throttled; vcgencmd measure_temp
   echo "== disk =="; df -h /; df -i /
   echo "== memory =="; free -h
   echo "== network =="; ip -brief addr; ip route
   echo "== wifi =="; iw dev wlan0 link 2>&1
   echo "== time =="; timedatectl
-  echo "== failed units =="; systemctl --failed --no-pager
-  echo "== agent =="; systemctl status telephone-agent.service --no-pager
-  echo "== gadget unit =="; systemctl status uac-gadget.service --no-pager
-  echo "== udc =="; cat /sys/kernel/config/usb_gadget/agent/UDC 2>&1
-  echo "== cards =="; cat /proc/asound/cards
-  echo "== pcm =="; aplay -l; arecord -l
-  echo "== dmesg =="; dmesg | tail -n 120
-  echo "== agent log =="; sudo journalctl -u telephone-agent.service -n 300 --no-pager
-  echo "== gadget log =="; sudo journalctl -u uac-gadget.service -b -n 120 --no-pager
-  echo "== timers =="; systemctl list-timers --all --no-pager
+  echo "== failed units =="; systemctl --user --failed --no-pager
+  echo "== bluetooth =="; bluetoothctl show; bluetoothctl info "${BT_ADDRESS}"
+  echo "== hfp =="; ./scripts/bluetooth-check.sh --idle "${BT_ADDRESS}" 2>&1
+  echo "== sco =="; pw-dump 2>&1 | grep -E 'bluez_(input|output)\.|api\.bluez5\.sco' | head -n 40
+  echo "== pipewire =="; systemctl --user status pipewire wireplumber --no-pager
+  echo "== agent =="; systemctl --user status telephone-agent-bluetooth.service --no-pager
+  echo "== agent log =="; journalctl --user -u telephone-agent-bluetooth.service -n 300 --no-pager
+  echo "== inbound =="; systemctl --user status telephone-agent-inbound.service --no-pager
+  echo "== timers =="; systemctl --user list-timers --all --no-pager
   echo "== ports =="; sudo ss -tlnp
-  echo "== modules =="; lsmod | grep -E 'dwc2|libcomposite|u_audio|snd_usb_audio'
 } >"$out" 2>&1
 echo "Wrote $out"
 ```
 
-Also record the phone model, One UI version, helper version, and whether the failure happens on every
-call or only some calls. Those details are not available from the Pi because the phone is the USB host
-and `adb` is unavailable over the gadget cable.
+Also record the phone model, One UI version, helper version, Bluetooth adapter model, and
+whether the failure happens on every call or only some calls. If adb is available, collect
+`adb logcat -s DialHelper` separately, with numbers and tokens removed.
 
 ## Related documents
 
-[Operations](./operations.md), [runbook](./runbook.md), [Raspberry Pi setup](./raspberry-pi-setup.md),
-[Android setup](./android-setup.md), [Bluetooth HFP](./bluetooth-hfp.md), [hardware](./hardware.md), and the
-[service unit](../scripts/systemd/telephone-agent.service).
+[Operations](./operations.md), [runbook](./runbook.md),
+[Bluetooth HFP](./bluetooth-hfp.md), [Inbound calls](./inbound.md),
+[Android setup](./android-setup.md), the
+[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), and the
+[inbound user service](../scripts/systemd/telephone-agent-inbound.service).

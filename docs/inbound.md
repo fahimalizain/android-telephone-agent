@@ -1,10 +1,10 @@
 # Inbound calls
 
 The inbound path turns Phone A into an answering agent: the helper reports a
-ringing call over the LAN, the Pi asks it to answer, and the Grok Voice realtime
-adapter handles the conversation. This document covers the signaling topology,
-the helper contract, configuration, systemd deployment, and the privacy limits
-you must accept before enabling auto-answer.
+ringing call over the LAN, the Linux host asks it to answer, and the Grok Voice
+realtime adapter handles the conversation. This document covers the signaling
+topology, the helper contract, configuration, systemd deployment, and the privacy
+limits you must accept before enabling auto-answer.
 
 The outbound path is documented in [Voice agent](voice-agent.md) and
 [Architecture](architecture.md). The helper's full API is in
@@ -15,19 +15,20 @@ The outbound path is documented in [Voice agent](voice-agent.md) and
 ```text
                  LAN, bearer token
   ┌────────────┐  GET /state      ┌──────────────────────────┐
-  │   Phone A  │◀────────────────▶│  Pi: telephone-agent      │
-  │  SIM +     │  POST /answer    │  inbound watcher          │
-  │  helper    │  POST /hangup    │  Grok Voice session       │
-  └─────┬──────┘                  └────────────┬─────────────┘
+  │   Phone A  │◀────────────────▶│  Linux host:             │
+  │  SIM +     │  POST /answer    │  telephone-agent         │
+  │  helper    │  POST /hangup    │  inbound watcher         │
+  └─────┬──────┘                  │  Grok Voice session      │
+        │                         └────────────┬─────────────┘
         │                                      │
-        │  Bluetooth HFP SCO or USB audio      │
+        │  Bluetooth HFP SCO audio             │
         └──────────────────────────────────────┘
                  call audio only
 ```
 
 The helper is the **signaling path**. It owns Android call control and exposes
-the call phase. Call audio is separate: it travels over Bluetooth HFP (PipeWire
-SCO nodes) or the USB Audio Class gadget. Bluetooth HFP does not carry a ringing
+the call phase. Call audio is separate: it travels over Bluetooth HFP and appears
+as PipeWire SCO nodes. Bluetooth HFP does not carry a ringing
 event or caller ID to user space; the helper is how the agent learns that a call
 is ringing.
 
@@ -64,11 +65,10 @@ scheduled `run` while the inbound watcher is enabled.
   pipeline, which has no inbound audio path.
 - The helper provisioned with `ANSWER_PHONE_CALLS` and a valid bearer token. See
   [Dial helper](dial-helper.md) and [Android setup](android-setup.md).
-- An audio path that exists only while the call is active:
-  - Bluetooth HFP: PipeWire and WirePlumber in the **same user session** as the
-    agent, with the host in the Hands-Free role and Phone A set to **Calls and
-    audio**. See [Bluetooth HFP](bluetooth-hfp.md).
-  - USB gadget: the gadget is enumerated and Phone A routes call audio to it.
+- An audio path that exists only while the call is active: Bluetooth HFP with
+  PipeWire and WirePlumber in the **same user session** as the agent, the host in
+  the Hands-Free role, and Phone A set to **Calls and audio**. See
+  [Bluetooth HFP](bluetooth-hfp.md).
 - An `XAI_API_KEY` in the service environment or `[realtime].api_key`.
 
 ## Configuration
@@ -174,8 +174,8 @@ The unit must share the user's PipeWire/WirePlumber session. A system unit
 running as another user has a different session bus and `XDG_RUNTIME_DIR` and
 will not find the SCO nodes. Enable lingering if nobody is logged in.
 
-The USB gadget path is also supported: the ALSA device is independent of the
-call, but Phone A must route call audio to the gadget.
+The SCO source and sink are the only audio path. The helper cannot create them,
+and they do not exist while the phone is merely ringing.
 
 ## Auto-answer and privacy
 

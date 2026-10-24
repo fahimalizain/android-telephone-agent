@@ -1,23 +1,18 @@
 # Bluetooth HFP Audio
 
-This guide configures the Bluetooth Hands-Free Profile (HFP) alternative to the USB
-Audio Class gadget. The Linux host advertises itself as an HFP **hands-free unit (HF)**
-and Phone A acts as the **audio gateway (AG)**. Android routes call audio to the host over
-a synchronous SCO link, and PipeWire exposes both directions to the agent.
-
-USB remains the default and canonical transport. Use this path when the host cannot act as
-a USB device, when the USB port is needed for charging or development, or when a USB
-gadget does not enumerate or route reliably on the phone. The USB guide is
-[Raspberry Pi setup](./raspberry-pi-setup.md); the decision is recorded in
-[ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
+This is the primary host and audio guide. The Linux host advertises itself as a Bluetooth
+Hands-Free Profile (HFP) **hands-free unit (HF)** and Phone A acts as the **audio
+gateway (AG)**. Android routes call audio to the host over a synchronous SCO link, and
+PipeWire exposes both directions to the agent. Bluetooth HFP is the only supported audio
+transport; the earlier Pi-based and USB audio route was removed by
+[ADR 0009](./decisions/0009-bluetooth-only-linux-host.md).
 
 Status: validated end to end with a Linux laptop (BlueZ 5.85, PipeWire 1.6.2,
 WirePlumber 0.5.13) and a Samsung Galaxy A23 4G (SM-A235F) on the onboard adapter.
 Outbound PSTN calls were placed through the LAN helper, audio ran over HFP SCO at mSBC
 16 kHz in both directions, and the Grok Voice realtime adapter held a real conversation.
-The Raspberry Pi Zero 2 W is expected to work but is **unverified**. Inbound answering is
-implemented but no live inbound PSTN call has been validated, and latency has not been
-measured.
+Inbound answering is implemented but no live inbound PSTN call has been validated, and
+latency has not been measured.
 
 ## 1. Topology
 
@@ -35,9 +30,9 @@ flowchart LR
   PA <-->|"cellular voice"| B
 ```
 
-Bluetooth replaces only the audio transport. Dialing and hangup stay in the helper app,
-so Phone A must still be reachable on the LAN. HFP AT commands for dialing and hangup are
-not implemented by the agent.
+Bluetooth carries audio only. Dialing and hangup stay in the helper app, so Phone A must
+still be reachable on the LAN. HFP AT commands for dialing and hangup are not implemented
+by the agent.
 
 During a call, PipeWire creates two nodes:
 
@@ -66,7 +61,7 @@ hard-coded `.0` or `.1`.
 | SCO nodes | `bluez_input...` source for the downlink, `bluez_output...` sink for the uplink |
 | Tools | `pw-record` captured the SCO source; `pw-play` injected a test tone into the SCO sink |
 | Link quality | RSSI about -87 dBm; the first call dropped the Bluetooth link during setup and needed a manual reconnect, later calls were stable |
-| Not validated | The Pi Zero 2 W; HFP call control from Linux; a live inbound PSTN call; latency measurements; the USB UAC1 gadget |
+| Not validated | HFP call control from Linux; a live inbound PSTN call; latency measurements |
 
 The cellular codec still caps fidelity. mSBC gives a 16 kHz link between the phone and the
 host, but an AMR-NB network leg remains 8 kHz.
@@ -82,9 +77,8 @@ and then starts audio; `[realtime].greeting` is spoken once those nodes are read
 Auto-answer has no caller-ID filter. The helper does not request `READ_CALL_LOG`, and
 `/state` returns only a phase. Inbound and outbound calls are mutually exclusive: the
 helper rejects `/call` while a call is ringing or active, and the watcher waits for `idle`
-before re-arming. The daemon is unit-tested; the helper endpoints are implemented, but no
-live inbound PSTN call has been validated over Bluetooth or USB. See
-[Inbound calls](./inbound.md).
+before re-arming. The daemon is unit-tested and the helper endpoints are implemented, but
+no live inbound PSTN call has been validated. See [Inbound calls](./inbound.md).
 
 ## 3. Host prerequisites
 
@@ -92,7 +86,7 @@ live inbound PSTN call has been validated over Bluetooth or USB. See
 |---|---|
 | Operating system | Linux with BlueZ, PipeWire, and WirePlumber in the same user session |
 | Bluetooth | A working adapter; onboard Bluetooth is sufficient for the validated setup |
-| Phone | Phone A paired and trusted, with call audio enabled for the host |
+| Phone | Phone A paired and trusted, with **Calls and audio** enabled for the host |
 | Tools | `bluetoothctl`, `wpctl`, `pw-dump`, `pw-record`, `pw-play`, and `python3` |
 | Privileges | No root for the Bluetooth scripts or the agent; WirePlumber configuration is per-user |
 | Agent | A runtime with the PipeWire audio backend, configured for `backend = "pipewire"` |
@@ -337,8 +331,7 @@ Direction reminder:
 
 The audio test script records and generates the tone at 16 kHz mono. `play` sends the WAV
 as-is, and PipeWire resamples between the stream and the SCO link (16 kHz with mSBC, 8 kHz
-with CVSD). The USB loopback script (`scripts/audio-loopback-test.sh`) targets the ALSA
-gadget and does not apply here.
+with CVSD).
 
 ## 9. Configure the agent
 
@@ -356,8 +349,8 @@ frame_ms = 20
 
 `bluetooth_address` is Phone A's address, in the same form as `bluetoothctl info`.
 `node_timeout_s` bounds the wait for SCO nodes after the call is placed; the default is
-30 seconds. The `card` and `device` keys are used only by the USB backend and can remain
-in the file for a dual-path installation.
+30 seconds. `sample_rate`, `channels`, and `frame_ms` describe the pipeline format; the
+Bluetooth backend handles the SCO link rate.
 
 The equivalent environment overrides are:
 
@@ -405,21 +398,21 @@ nodes and starts the audio loop. Dialing does not use HFP AT commands.
 ## 10. Run in the PipeWire user session
 
 PipeWire and WirePlumber run per user. The agent must run as that same user so it can
-reach the PipeWire socket and the session bus. The existing system-level one-shot unit under
-`/etc/systemd/system/` is for the USB path and does not work unchanged for Bluetooth.
+reach the PipeWire socket and the session bus. A system-level service running as another
+user does not share that session.
 
 The repository ships user units:
 
 - `scripts/systemd/telephone-agent-bluetooth.service`
 - `scripts/systemd/telephone-agent-bluetooth.timer`
 
-They use `%h` for the home directory and assume the repository is at
-`~/android-telephone-agent`. Edit the `%h`-based paths (`WorkingDirectory`,
-`EnvironmentFile`, and `ExecStart`) if yours is elsewhere. Review the timer's
-`OnCalendar` value for your slot. The shipped timer uses `Persistent=false` to
-match the operations policy: a missed slot is skipped rather than called late.
-Set it to `true` only if catch-up is acceptable. Install them as user units and
-enable the timer:
+They use `%h` for the home directory, assume the repository is at
+`~/android-telephone-agent`, and use the `agent/.venv` console script. Edit the `%h`-based
+paths (`WorkingDirectory`, `EnvironmentFile`, and `ExecStart`) if yours is elsewhere.
+Review the timer's `OnCalendar` value for your slot. The shipped timer uses
+`Persistent=false` to match the operations policy: a missed slot is skipped rather than
+called late. Set it to `true` only if catch-up is acceptable. Install them as user units
+and enable the timer:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -440,8 +433,8 @@ It runs after `pipewire.service` and `wireplumber.service` and has `WantedBy=def
 `loginctl enable-linger` is important on a headless host. Without it, the user manager and
 PipeWire stop when the last session ends, and the timer does not fire reliably.
 
-Do not enable both the root USB unit and the Bluetooth user unit for the same call slot.
-Choose one audio path and one scheduler. To run a supervised call instead of the timer:
+Do not enable both an outbound timer and the inbound watcher for the same phone and call
+slot. Choose one mode and one scheduler. To run a supervised call instead of the timer:
 
 ```bash
 systemctl --user start telephone-agent-bluetooth.service
@@ -472,13 +465,12 @@ journalctl --user -u telephone-agent-bluetooth.service -f
 
 ## 12. Limitations
 
-- **Pi Zero 2 W unverified.** The validated host was a laptop. The Pi's onboard Bluetooth
-  and single 2.4 GHz radio are expected to work but need a supervised test. Coexistence
-  with Wi-Fi is the main unknown.
+- **Bluetooth only.** HFP is the only supported audio transport. The earlier Pi-based and
+  USB audio route was removed, and its scripts and hardware documentation no longer exist.
+  See [ADR 0009](./decisions/0009-bluetooth-only-linux-host.md).
 - **Inbound is not live-validated.** The helper endpoints and the `inbound` daemon are
-  implemented; the daemon is unit-tested, but no live inbound PSTN call has been exercised
-  over Bluetooth or USB. Bluetooth cannot signal a ringing call; the helper must answer
-  before SCO nodes exist.
+  implemented; the daemon is unit-tested, but no live inbound PSTN call has been exercised.
+  Bluetooth cannot signal a ringing call; the helper must answer before SCO nodes exist.
 - **Weak links drop.** The validated run had RSSI around -87 dBm. The first call dropped
   the Bluetooth link during setup and needed a manual reconnect, although later calls were
   stable. Treat a drop during setup as a known failure mode rather than a code bug.
@@ -496,16 +488,13 @@ journalctl --user -u telephone-agent-bluetooth.service -f
   the same call slot, and concurrency needs another host and phone pair.
 - **Reconnection is best effort.** Pairing and trust help, but a reboot, adapter reset, or
   WirePlumber restart can leave the phone disconnected.
-- **USB remains the default.** This path is an alternative, not a replacement. The USB
-  gadget, its scripts, and its system-level service remain supported, though the USB path
-  itself is not yet hardware-validated.
 
 ## Related documents
 
-- [Architecture](./architecture.md), sections 4.1 and 10.
+- [Architecture](./architecture.md), sections 4, 7, and 10.
 - [ADR 0006: Bluetooth HFP](./decisions/0006-use-bluetooth-hfp-audio.md).
-- [ADR 0001: USB audio gadget](./decisions/0001-use-usb-audio-gadget-instead-of-root.md).
-- [Raspberry Pi setup](./raspberry-pi-setup.md) for the canonical USB path.
+- [ADR 0009: Bluetooth-only Linux host](./decisions/0009-bluetooth-only-linux-host.md).
 - [Android setup](./android-setup.md) for the phone-side settings.
 - [Dial helper](./dial-helper.md) for `/health`, `/call`, and `/hangup`.
+- [Inbound calls](./inbound.md) for the answer watcher and privacy limits.
 - [Troubleshooting](./troubleshooting.md) and [FAQ](./faq.md).

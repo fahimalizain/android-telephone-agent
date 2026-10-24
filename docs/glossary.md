@@ -3,9 +3,12 @@
 Alphabetical. Definitions are specific to this project; vendor behavior may differ, so
 verify on your device.
 
-**ALSA.** Advanced Linux Sound Architecture, the kernel and userspace audio framework
-that exposes PCM devices. The agent uses `aplay` and `arecord` against the gadget's ALSA
-card.
+**AG (audio gateway).** The Bluetooth role that connects a phone's cellular call audio to
+a headset. In this project Phone A is the AG and the Linux host is the HF.
+
+**ALSA.** Advanced Linux Sound Architecture, the kernel and userspace audio framework.
+PipeWire sits above it on the host; the agent uses PipeWire tools rather than addressing
+an ALSA card directly.
 
 **AMR-NB.** Adaptive Multi-Rate Narrowband, an 8 kHz speech codec used on 2G/3G and
 circuit-switched fallback, with bit rates from about 4.75 to 12.2 kbit/s.
@@ -16,23 +19,17 @@ and 4G, with bit rates from about 6.6 to 23.85 kbit/s.
 **barge-in.** The callee speaking while the agent's TTS is playing. The agent must stop
 playback immediately so it does not talk over the callee.
 
-**configfs.** A kernel pseudo-filesystem used to create and bind USB gadget functions at
-runtime. The UAC1 function is instantiated there.
-
 **CS fallback.** Circuit-switched fallback: an LTE phone without VoLTE drops to 2G or
 3G to place or receive a voice call.
 
-**DFP and UFP.** Downstream-facing port and upstream-facing port, the USB-C data roles
-for host and device. Power role is negotiated separately, so a DFP can be a power sink.
+**CVSD.** Continuously Variable Slope Delta modulation, the narrowband 8 kHz codec used
+by Bluetooth SCO when mSBC is not negotiated.
 
 **Doze.** An Android idle power mode that defers background work. The dial helper should
 be exempt from battery optimization.
 
 **dual-SIM.** A phone with two SIM slots or subscriptions. Android needs a phone account
 handle to choose which SIM places a call.
-
-**dwc2.** The Synopsys USB 2.0 OTG controller driver used by the Pi Zero 2 W. In
-peripheral mode it presents the gadget to the phone.
 
 **E.164.** The international telephone numbering format: a leading plus, country code,
 and subscriber number, at most 15 digits.
@@ -46,21 +43,22 @@ and can carry wideband or super-wideband audio.
 **foreground service.** An Android service with a persistent notification, used by the
 dial helper so the system is less likely to kill it.
 
-**f_uac1.** The Linux USB gadget function that implements USB Audio Class 1. It provides
-the speaker and microphone interfaces used here.
+**helper.** The small Android app on Phone A that places and answers calls over the LAN
+with `TelecomManager`. It is the signaling path; Bluetooth carries the audio.
+
+**HF (hands-free unit).** The Bluetooth role that acts as the headset. The Linux host is
+the HF in this project.
 
 **HFP.** Bluetooth Hands-Free Profile, a profile for car kits and headsets that carries
 call control and SCO or eSCO audio. The phone is the audio gateway (AG); the headset or
-car kit is the hands-free unit (HF).
+car kit is the hands-free unit (HF). HFP is the only supported audio transport here.
 
-**host role and device role.** The two USB data roles: the host initiates enumeration
-and transfers, while the device responds. Phone A is host and the Pi is device.
+**inbound.** A call from a person to the agent's SIM. The opt-in inbound watcher polls the
+helper, answers the call, and runs a Grok Voice session. It is implemented and unit-tested
+but not live-validated, and it answers every call with no caller-ID filter.
 
 **journald volatile.** A systemd-journald setting that keeps logs in RAM and discards
-them on reboot, reducing SD card wear.
-
-**libcomposite.** The Linux kernel module that lets configfs assemble USB gadget
-functions into a composite device.
+them on reboot, reducing disk writes.
 
 **LLM.** Large language model, the component that turns a transcript and context into
 the agent's next response.
@@ -68,15 +66,13 @@ the agent's next response.
 **mSBC.** Modified SBC, a 16 kHz wideband codec used by HFP for better Bluetooth call
 audio than narrowband SCO.
 
-**OTG.** USB On-The-Go, a dual-role USB port that can act as host or device. The Pi Zero
-2 W OTG port acts as device.
-
 **phone account handle.** An Android `PhoneAccountHandle` that identifies a SIM or
 calling account. It is passed as `TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE` to avoid a
 SIM picker.
 
-**plughw.** An ALSA plugin that converts sample format, rate, and channel count to what
-the hardware accepts. It is used for the fixed-format gadget.
+**PipeWire.** The Linux media server that owns the host's audio graph. During an HFP call
+it exposes the downlink as a SCO source and the uplink as a SCO sink; the agent captures
+and plays those nodes with `pw-record` and `pw-play`.
 
 **PSTN.** Public switched telephone network, the circuit-switched telephone system that
 connects the cellular call to the callee.
@@ -86,7 +82,8 @@ decides the reply, and synthesizes audio, instead of separate STT, LLM, and TTS 
 The Grok Voice adapter is the optional implementation in this runtime.
 
 **SCO.** Synchronous Connection Oriented, a Bluetooth link used for call audio. It carries
-narrowband CVSD or wideband mSBC; eSCO is its enhanced, retransmitting variant.
+narrowband CVSD or wideband mSBC; eSCO is its enhanced, retransmitting variant. SCO nodes
+exist only while a call or SCO link is active.
 
 **SIM.** Subscriber Identity Module, the chip or profile that identifies a mobile
 subscription. SIM A is the agent's number.
@@ -95,7 +92,7 @@ subscription. SIM A is the agent's number.
 and final text.
 
 **TelecomManager.** The Android system service for placing and managing calls. The
-helper uses `placeCall()` and optionally `endCall()`.
+helper uses `placeCall()`, `acceptRingingCall()`, and optionally `endCall()`.
 
 **TTFA.** Time to first audio, the delay from a TTS request to the first playable audio
 chunk.
@@ -104,26 +101,15 @@ chunk.
 
 **TTS.** Text-to-speech, the streaming synthesis of the agent's response into audio.
 
-**UAC, UAC1, UAC2.** USB Audio Class, a standard class for audio devices. UAC1 is the
-full-speed class 1 subset used here, and UAC2 is the class 2 fallback.
-
-**UPS.** Uninterruptible power supply, a battery-backed supply that covers the hub and
-router during a mains outage. Phone A uses its own battery.
-
-**USB gadget.** The Linux device-side USB stack. It lets a board appear as a peripheral,
-such as a headset, to a host.
-
-**USB-C PD.** USB-C Power Delivery, a negotiation protocol for voltage and current. The
-hub uses it to pass charger power to the phone.
-
 **VAD.** Voice activity detection, distinguishing speech from silence or noise so the
 agent knows when to listen and when to stop.
-
-**VBUS.** The 5 V power rail on a USB cable. The source of VBUS determines who powers
-whom; here the hub sources it.
 
 **VoLTE.** Voice over LTE, speech carried as RTP over an IMS packet data network managed
 by the modem rather than over a circuit.
 
-**watchdog.** A hardware or software timer that reboots a hung system if it is not
+**watchdog.** A hardware or software timer that reboots a hung host if it is not
 serviced. It is separate from systemd's `Restart=always`.
+
+**WirePlumber.** The session and policy manager for PipeWire. It loads the HFP
+hands-free role, manages the Bluetooth device, and creates the SCO nodes during a call.
+It runs per user, alongside PipeWire.
