@@ -7,7 +7,7 @@ CONFIG ?= config/config.toml
 BT_ADDRESS ?=
 BT_AUDIO_TEST_ARGS ?= list
 
-.PHONY: venv install test lint format run doctor clean \
+.PHONY: venv install test lint format run run-direct daemon doctor clean \
 	bluetooth-setup bluetooth-check bluetooth-audio-test
 
 venv:
@@ -31,10 +31,16 @@ format:
 run:
 	cd $(AGENT) && ../$(PYTHON) -m telephone_agent --config "$(abspath $(CONFIG))" run
 
+run-direct:
+	cd $(AGENT) && ../$(PYTHON) -m telephone_agent --config "$(abspath $(CONFIG))" run --direct
+
+daemon:
+	cd $(AGENT) && ../$(PYTHON) -m telephone_agent --config "$(abspath $(CONFIG))" daemon
+
 doctor:
 	cd $(AGENT) && ../$(PYTHON) -m telephone_agent --config "$(abspath $(CONFIG))" doctor
 
-# Bluetooth HFP is a user-level alternative to the UAC gadget. Do not use sudo.
+# Bluetooth HFP runs in the user PipeWire session. Do not use sudo.
 # For audio-test arguments: make bluetooth-audio-test BT_AUDIO_TEST_ARGS="record 10"
 bluetooth-setup:
 	"./scripts/bluetooth-setup.sh"
