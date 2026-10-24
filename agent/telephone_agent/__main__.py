@@ -16,6 +16,7 @@ import logging
 import shutil
 import sys
 import threading
+import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from .grok_realtime import (
 )
 from .pipeline import CallEndReason, CallSession, CallState, SessionEvent
 from .service import CallService, CallTask, SessionFactory
+from .transcript import TranscriptLogger
 
 logger = logging.getLogger(__name__)
 
@@ -329,9 +331,18 @@ def _cmd_dial(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     config = load(Path(args.config))
     number = _resolve_number(config, args.number)
-    session = _build_session(config, number)
-    print(f"running one call to {mask_number(number)}")
-    result = session.run()
+    transcript = _open_transcript(config, call_id=uuid.uuid4().hex, number=number)
+    try:
+        session = _build_session(
+            config,
+            number,
+            on_event=transcript.record if transcript is not None else None,
+        )
+        print(f"running one call to {mask_number(number)}")
+        result = session.run()
+    finally:
+        if transcript is not None:
+            transcript.close()
     print(
         f"call ended: state={result.state.value} reason={result.reason.value} "
         f"turns={result.turns} duration={result.duration_s:.1f}s"
@@ -427,40 +438,55 @@ def _build_session_factory(config: Config) -> SessionFactory:
         stop_event: threading.Event,
         on_event: Callable[[SessionEvent], None],
     ) -> CallSession | GrokRealtimeSession:
-        audio = _audio_from_config(config)
-        dialer = _dialer_from_config(config.dialer)
-        limit = (
-            task.max_call_seconds
-            if task.max_call_seconds is not None
-            else config.agent.max_call_seconds
-        )
-        if config.realtime.kind == "grok":
-            return _build_realtime_session(
-                config,
-                audio,
-                dialer,
-                task.number,
-                objective=task.objective,
-                broker=broker,
-                stop_event=stop_event,
-                on_event=on_event,
-                max_call_seconds=limit,
+        call_id = getattr(task, "id", "") or uuid.uuid4().hex
+        transcript = _open_transcript(config, call_id=call_id, number=task.number)
+
+        def handle_event(event: SessionEvent) -> None:
+            if transcript is not None:
+                transcript.record(event)
+            on_event(event)
+
+        callback = on_event if transcript is None else handle_event
+
+        try:
+            audio = _audio_from_config(config)
+            dialer = _dialer_from_config(config.dialer)
+            limit = (
+                task.max_call_seconds
+                if task.max_call_seconds is not None
+                else config.agent.max_call_seconds
             )
-        brain = build_deliberative_brain(config.brain)
-        return CallSession(
-            audio=audio,
-            dialer=dialer,
-            deliberative=brain,
-            consultations=broker,
-            number=task.number,
-            max_call_seconds=limit,
-            silence_timeout_s=config.agent.silence_timeout_s,
-            vad_threshold=config.agent.vad_threshold,
-            consult_timeout_s=config.agent.consult_timeout_s,
-            holding_phrase=config.agent.holding_phrase,
-            on_event=on_event,
-            stop_event=stop_event,
-        )
+            if config.realtime.kind == "grok":
+                return _build_realtime_session(
+                    config,
+                    audio,
+                    dialer,
+                    task.number,
+                    objective=task.objective,
+                    broker=broker,
+                    stop_event=stop_event,
+                    on_event=callback,
+                    max_call_seconds=limit,
+                )
+            brain = build_deliberative_brain(config.brain)
+            return CallSession(
+                audio=audio,
+                dialer=dialer,
+                deliberative=brain,
+                consultations=broker,
+                number=task.number,
+                max_call_seconds=limit,
+                silence_timeout_s=config.agent.silence_timeout_s,
+                vad_threshold=config.agent.vad_threshold,
+                consult_timeout_s=config.agent.consult_timeout_s,
+                holding_phrase=config.agent.holding_phrase,
+                on_event=callback,
+                stop_event=stop_event,
+            )
+        except Exception:
+            if transcript is not None:
+                transcript.close()
+            raise
 
     return build
 
@@ -528,18 +554,38 @@ async def _serve(service: CallService, apps: Sequence[tuple[object, str, int]]) 
         await service.stop()
 
 
-def _build_session(config: Config, number: str) -> CallSession | GrokRealtimeSession:
+def _open_transcript(
+    config: Config,
+    *,
+    call_id: str,
+    number: str,
+) -> TranscriptLogger | None:
+    """Create this call's transcript writer when the feature is enabled."""
+
+    if not config.transcript.enabled:
+        return None
+    transcript = TranscriptLogger(config.transcript.directory, call_id=call_id)
+    transcript.call_start(direction="outbound", number=number)
+    return transcript
+
+
+def _build_session(
+    config: Config,
+    number: str,
+    *,
+    on_event: Callable[[SessionEvent], None] | None = None,
+) -> CallSession | GrokRealtimeSession:
     """Create the call session selected by the configuration.
 
     ``realtime.kind = "grok"`` returns the independent speech-to-speech
     adapter. The default path keeps the text pipeline and its injected speech
-    adapter seams.
+    adapter seams. *on_event*, when supplied, observes both paths.
     """
 
     audio = _audio_from_config(config)
     dialer = _dialer_from_config(config.dialer)
     if config.realtime.kind == "grok":
-        return _build_realtime_session(config, audio, dialer, number)
+        return _build_realtime_session(config, audio, dialer, number, on_event=on_event)
     brain = build_brain(config.brain)
     return CallSession(
         audio=audio,
@@ -549,6 +595,7 @@ def _build_session(config: Config, number: str) -> CallSession | GrokRealtimeSes
         max_call_seconds=config.agent.max_call_seconds,
         silence_timeout_s=config.agent.silence_timeout_s,
         vad_threshold=config.agent.vad_threshold,
+        on_event=on_event,
         # transcriber=MyTranscriber(),  # not bundled; see agent/README.md
         # synthesizer=MySynthesizer(),  # not bundled; see agent/README.md
     )

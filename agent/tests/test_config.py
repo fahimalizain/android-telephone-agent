@@ -14,6 +14,7 @@ from telephone_agent.config import (
     DialerConfig,
     RealtimeConfig,
     ServerConfig,
+    TranscriptConfig,
     ensure_e164,
     load,
     validate,
@@ -62,6 +63,9 @@ def test_load_applies_defaults(tmp_path: Path) -> None:
     assert config.server.token == ""
     assert config.server.public_url == ""
     assert config.server.audit_log == ""
+    assert config.transcript == TranscriptConfig()
+    assert config.transcript.enabled is False
+    assert config.transcript.directory == "runtime/transcripts"
 
 
 def test_load_reads_all_sections(tmp_path: Path) -> None:
@@ -831,3 +835,67 @@ def test_example_config_is_complete_and_valid() -> None:
     assert config.dialer.token
     assert config.audio.sample_rate == 16000
     assert config.brain.kind in {"echo", "http"}
+
+
+def test_load_reads_transcript_section(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        BASE_CONFIG
+        + """
+[transcript]
+enabled = true
+directory = "/var/lib/telephone-agent/transcripts"
+""",
+    )
+
+    config = load(path, env={})
+
+    assert config.transcript.enabled is True
+    assert config.transcript.directory == "/var/lib/telephone-agent/transcripts"
+
+
+def test_environment_overrides_transcript(tmp_path: Path) -> None:
+    env = {
+        "TELEPHONE_AGENT_TRANSCRIPT__ENABLED": "true",
+        "TELEPHONE_AGENT_TRANSCRIPT__DIRECTORY": "/tmp/telephone-agent-transcripts",
+    }
+
+    config = load(_write(tmp_path), env=env)
+
+    assert config.transcript.enabled is True
+    assert config.transcript.directory == "/tmp/telephone-agent-transcripts"
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off"])
+def test_transcript_enabled_env_accepts_falsey_values(tmp_path: Path, value: str) -> None:
+    env = {"TELEPHONE_AGENT_TRANSCRIPT__ENABLED": value}
+
+    config = load(_write(tmp_path), env=env)
+
+    assert config.transcript.enabled is False
+
+
+def test_transcript_enabled_rejects_a_non_boolean_env_value(tmp_path: Path) -> None:
+    env = {"TELEPHONE_AGENT_TRANSCRIPT__ENABLED": "sometimes"}
+
+    with pytest.raises(ConfigError, match="transcript.enabled must be a boolean"):
+        load(_write(tmp_path), env=env)
+
+
+@pytest.mark.parametrize(
+    "transcript_block, message",
+    [
+        ('[transcript]\nenabled = true\ndirectory = ""', "transcript.directory"),
+        ('[transcript]\nenabled = "yes"', "transcript.enabled must be a boolean"),
+        ("[transcript]\nenabled = true\ndirectory = 7", "transcript.directory must be a string"),
+    ],
+)
+def test_transcript_validation(
+    tmp_path: Path,
+    transcript_block: str,
+    message: str,
+) -> None:
+    path = _write(tmp_path, f"{BASE_CONFIG}\n{transcript_block}\n")
+
+    with pytest.raises(ConfigError, match=message):
+        load(path, env={})

@@ -26,6 +26,7 @@ from .config import (
     ConfigError,
     DialerConfig,
     RealtimeConfig,
+    TranscriptConfig,
     ensure_e164,
     load,
     validate,
@@ -40,6 +41,7 @@ from .pipeline import (
     Synthesizer,
     Transcriber,
 )
+from .transcript import TranscriptLogger
 from .vad import Endpointer, dbfs_from_rms, is_speech, pcm_to_samples, rms
 
 __version__ = "0.1.0"
@@ -74,6 +76,8 @@ __all__ = [
     "RealtimeConfig",
     "Synthesizer",
     "Transcriber",
+    "TranscriptConfig",
+    "TranscriptLogger",
     "__version__",
     "build_brain",
     "dbfs_from_rms",

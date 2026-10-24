@@ -200,6 +200,8 @@ actionable message.
 | `server` | `token` | empty | Shared bearer token for the MCP and A2A RPC endpoints. Required by `serve`; at least 8 characters when set. Prefer the environment override. |
 | `server` | `public_url` | empty | Externally reachable base URL used in the A2A Agent Card and in the MCP transport's allowed hosts. Required when `host` is not loopback. |
 | `server` | `audit_log` | empty | Optional append-only JSONL path for `CallService` task events. |
+| `transcript` | `enabled` | `false` | Write one local JSONL transcript per call for both `run` and `serve`. Off by default; when false, no directory or file is created. |
+| `transcript` | `directory` | `runtime/transcripts` | Directory for transcript files. Created with mode 0700; each file is mode 0600. A relative path uses the process working directory. |
 
 For Bluetooth HFP, the audio section looks like this:
 
@@ -356,6 +358,48 @@ The optional `[server].audit_log` appends one JSON object per task event with
 `finished` record drops the objective and full transcript, and the destination
 is masked, but per-turn `transcript` and `reply` events do contain text. Apply a
 retention rule and restrict access.
+
+## Local call transcripts
+
+Set `[transcript].enabled = true` to persist one JSONL file per call from both
+`telephone-agent run` and every delegated call handled by `telephone-agent
+serve`. The default is off, and when off the runtime creates neither the
+directory nor a file. `directory` defaults to `runtime/transcripts`, relative to
+the process working directory; `runtime/` is already gitignored.
+
+Files are named `YYYYmmddTHHMMSS-<short-id>.jsonl`, using local wall-clock time
+at the start of the call and the first eight safe characters of the call or task
+id. The directory is created with mode `0700` and each file is opened
+append-only with mode `0600`. The logger is best-effort: if it cannot create or
+write the file, it logs a warning and disables transcript writes for that call
+without interrupting the call.
+
+Every line is one UTF-8 JSON object with `ts` (ISO 8601 wall-clock time in the
+local time zone, millisecond precision), `call_id`, and `event`. The current
+events are:
+
+| `event` | Additional fields |
+|---|---|
+| `call_start` | `direction` (`outbound`) and `number` (masked with `mask_number`) |
+| `transcript` | `role` (`callee`) and `text` |
+| `reply` | `role` (`agent`) and `text` |
+| `call_end` | `state`, `reason`, `turns`, and `duration_s` |
+
+Example:
+
+```json
+{"ts":"2026-10-24T09:15:02.123+05:30","call_id":"8f3c...","event":"call_start","direction":"outbound","number":"*******0100"}
+{"ts":"2026-10-24T09:15:08.406+05:30","call_id":"8f3c...","event":"transcript","role":"callee","text":"Hello?"}
+{"ts":"2026-10-24T09:15:09.115+05:30","call_id":"8f3c...","event":"reply","role":"agent","text":"Hi, this is the telephone agent."}
+{"ts":"2026-10-24T09:15:31.900+05:30","call_id":"8f3c...","event":"call_end","state":"idle","reason":"completed","turns":1,"duration_s":29.7}
+```
+
+The schema is extensible: consumers should ignore unknown events and fields.
+Audio is never written, and phone numbers are always masked; a raw E.164 number
+must not appear in a transcript file. Transcript text and the objective are
+personal data. Keep `directory` on the local device, restrict access to the
+service user, and apply a retention or deletion policy appropriate to the
+deployment. Do not include transcript files in backups that leave the device.
 
 ## Plugging in STT, TTS, and an LLM
 

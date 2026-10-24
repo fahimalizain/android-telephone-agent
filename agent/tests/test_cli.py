@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import builtins
+import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from telephone_agent.__main__ import (
     _build_session_factory,
     _check_pipewire_tools,
     _cmd_doctor,
+    _cmd_run,
     _cmd_selftest,
     _cmd_serve,
     _dialer_from_config,
@@ -38,8 +40,17 @@ from telephone_agent.config import (
     DialerConfig,
     RealtimeConfig,
     ServerConfig,
+    TranscriptConfig,
 )
 from telephone_agent.consult import ConsultationBroker
+from telephone_agent.pipeline import (
+    AgentReply,
+    CallEndReason,
+    CallFinished,
+    CallResult,
+    CallState,
+    Utterance,
+)
 
 ADDRESS = "AA:BB:CC:DD:EE:FF"
 
@@ -641,6 +652,147 @@ def test_build_session_factory_wires_the_realtime_adapter(
     assert captured["holding_phrase"] == "Hold on."
     assert captured["on_event"] is on_event
     assert captured["stop_event"] is stop_event
+
+
+def test_build_session_factory_records_transcripts_and_forwards_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "transcripts"
+    config = Config(
+        audio=AudioConfig(card="UAC1Gadget"),
+        dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
+        transcript=TranscriptConfig(enabled=True, directory=str(directory)),
+    )
+    captured: dict[str, object] = {}
+    service_events: list[object] = []
+
+    def fake_call_session(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("telephone_agent.__main__._audio_from_config", lambda _config: object())
+    monkeypatch.setattr("telephone_agent.__main__._dialer_from_config", lambda _config: object())
+    monkeypatch.setattr(
+        "telephone_agent.__main__.build_deliberative_brain",
+        lambda _config: object(),
+    )
+    monkeypatch.setattr("telephone_agent.__main__.CallSession", fake_call_session)
+
+    task = SimpleNamespace(
+        id="call-1234567890",
+        number="+15555550100",
+        max_call_seconds=None,
+        objective="Confirm the appointment.",
+    )
+    _build_session_factory(config)(
+        task=task,
+        broker=ConsultationBroker(),
+        stop_event=threading.Event(),
+        on_event=service_events.append,
+    )
+
+    callback = captured["on_event"]
+    assert callable(callback)
+    events = [
+        Utterance("Hello?"),
+        AgentReply("Hi, this is the agent."),
+        CallFinished(
+            CallResult(
+                state=CallState.IDLE,
+                reason=CallEndReason.COMPLETED,
+                duration_s=9.5,
+                turns=1,
+            )
+        ),
+    ]
+    for event in events:
+        callback(event)
+
+    # The service's own callback still receives every event unchanged.
+    assert service_events == events
+
+    paths = list(directory.glob("*.jsonl"))
+    assert len(paths) == 1
+    records = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines()]
+    assert [record["event"] for record in records] == [
+        "call_start",
+        "transcript",
+        "reply",
+        "call_end",
+    ]
+    assert records[0]["call_id"] == "call-1234567890"
+    assert records[0]["number"] == "*******0100"
+    assert records[1]["text"] == "Hello?"
+    assert records[2]["text"] == "Hi, this is the agent."
+    assert records[3]["reason"] == "completed"
+
+
+def test_cmd_run_records_transcript_and_passes_the_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    directory = tmp_path / "transcripts"
+    path = _write_config(
+        tmp_path,
+        f"""
+phone_number = "+15555550100"
+
+[audio]
+card = "UAC1Gadget"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+
+[transcript]
+enabled = true
+directory = "{directory}"
+""",
+    )
+    captured: dict[str, object] = {}
+    result = CallResult(
+        state=CallState.IDLE,
+        reason=CallEndReason.COMPLETED,
+        duration_s=4.5,
+        turns=1,
+    )
+
+    def fake_build_session(
+        _config: Config,
+        _number: str,
+        *,
+        on_event: object = None,
+    ) -> object:
+        captured["on_event"] = on_event
+
+        class FakeSession:
+            def run(self) -> CallResult:
+                on_event(Utterance("hello"))
+                on_event(AgentReply("hi"))
+                on_event(CallFinished(result))
+                return result
+
+        return FakeSession()
+
+    monkeypatch.setattr("telephone_agent.__main__._build_session", fake_build_session)
+
+    assert _cmd_run(argparse.Namespace(config=str(path), number=None)) == 0
+
+    assert callable(captured["on_event"])
+    paths = list(directory.glob("*.jsonl"))
+    assert len(paths) == 1
+    records = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines()]
+    assert [record["event"] for record in records] == [
+        "call_start",
+        "transcript",
+        "reply",
+        "call_end",
+    ]
+    assert records[0]["number"] == "*******0100"
+    output = capsys.readouterr().out
+    assert "call ended: state=idle reason=completed turns=1 duration=4.5s" in output
 
 
 def test_doctor_realtime_reports_missing_key(

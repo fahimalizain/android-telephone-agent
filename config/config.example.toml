@@ -159,3 +159,13 @@ public_url = ""
 # Optional append-only JSONL path for CallService task events. Leave empty to
 # disable the audit log. Transcripts are personal data; apply a retention rule.
 audit_log = ""
+
+[transcript]
+# Persist a local, timestamped JSONL transcript for every call started by `run`
+# or `serve`. The dataclass default is false; this example enables it. When
+# false, no directory or file is created.
+enabled = true
+# One file per call, named YYYYmmddTHHMMSS-<short-id>.jsonl. The directory is
+# created with mode 0700 and each file with mode 0600. A relative path is
+# resolved against the process working directory. runtime/ is gitignored.
+directory = "runtime/transcripts"

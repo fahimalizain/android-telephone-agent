@@ -181,6 +181,26 @@ The trade-off is explicit: volatile logs disappear on reboot or power loss, when
 useful. Ship the heartbeat and alert summaries off-box and keep a short call-outcome record in the state
 directory. For a specific crash, enable persistent storage temporarily, reproduce, then revert.
 
+### Local call transcripts
+
+The agent can write a separate transcript for each call without putting transcripts in journald. Set
+`[transcript].enabled = true` in the agent configuration; the code default is off, and when off neither
+the directory nor a file is created. `[transcript].directory` defaults to
+`runtime/transcripts` relative to the process working directory.
+
+Each call gets one append-only, UTF-8 JSONL file named
+`YYYYmmddTHHMMSS-<short-id>.jsonl`. The directory is created with mode `0700` and files are mode
+`0600`. Every line has `ts` (ISO 8601 local wall-clock time with milliseconds), `call_id`, and
+`event`; current events are `call_start` (direction, masked number), `transcript` (role `callee`,
+text), `reply` (role `agent`, text), and `call_end` (state, reason, turns, duration_s). Audio is never
+written, and phone numbers are masked before they reach the file.
+
+Treat transcript files as personal data. Keep them on the local device, readable only by the service
+user, and apply a retention or deletion policy appropriate to the deployment. They are excluded from
+git by the `runtime/` ignore rule, but do not include them in off-box backups unless the backup and
+retention policy explicitly covers call content. An I/O failure disables transcript writes for that
+call and logs a warning; it does not interrupt the call.
+
 ## 7. SD card wear
 
 The card is the most likely consumable. Reduce writes:

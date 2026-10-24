@@ -34,6 +34,7 @@ __all__ = [
     "DialerConfig",
     "RealtimeConfig",
     "ServerConfig",
+    "TranscriptConfig",
     "ensure_e164",
     "load",
     "validate",
@@ -187,6 +188,20 @@ class ServerConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TranscriptConfig:
+    """Settings for local call transcripts.
+
+    ``enabled = false`` keeps the default deployment quiet: no directory or file
+    is created. When enabled, each call writes one append-only JSONL file under
+    ``directory`` with mode 0600; the directory itself is created with mode 0700.
+    A relative path is resolved against the process working directory.
+    """
+
+    enabled: bool = False
+    directory: str = "runtime/transcripts"
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Top-level runtime configuration.
 
@@ -202,6 +217,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     phone_number: str = field(default="", repr=False)
+    transcript: TranscriptConfig = field(default_factory=TranscriptConfig)
 
 
 def ensure_e164(number: str, label: str = "phone number") -> str:
@@ -246,13 +262,22 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
     except OSError as exc:
         raise ConfigError(f"cannot read config file {config_path}: {exc}") from exc
 
-    allowed = {"phone_number", "audio", "dialer", "brain", "realtime", "agent", "server"}
+    allowed = {
+        "phone_number",
+        "audio",
+        "dialer",
+        "brain",
+        "realtime",
+        "agent",
+        "server",
+        "transcript",
+    }
     unknown = sorted(set(data) - allowed)
     if unknown:
         raise ConfigError(
             "unknown top-level configuration key(s): "
             f"{', '.join(unknown)}; expected phone_number, audio, dialer, brain, "
-            "realtime, agent, server"
+            "realtime, agent, server, transcript"
         )
 
     config = Config(
@@ -263,6 +288,7 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
         realtime=_build_section(RealtimeConfig, data.get("realtime"), "realtime"),
         agent=_build_section(AgentConfig, data.get("agent"), "agent"),
         server=_build_section(ServerConfig, data.get("server"), "server"),
+        transcript=_build_section(TranscriptConfig, data.get("transcript"), "transcript"),
     )
     config = _apply_env(config, os.environ if env is None else env)
     validate(config)
@@ -282,6 +308,7 @@ def validate(config: Config) -> None:
     _validate_realtime(config.realtime, config.audio)
     _validate_agent(config.agent)
     _validate_server(config.server)
+    _validate_transcript(config.transcript)
     if config.phone_number:
         ensure_e164(config.phone_number)
 
@@ -517,6 +544,16 @@ def _validate_server(server: ServerConfig) -> None:
         )
 
 
+def _validate_transcript(transcript: TranscriptConfig) -> None:
+    if not isinstance(transcript.enabled, bool):
+        raise ConfigError(f"transcript.enabled must be a boolean (got {transcript.enabled!r})")
+    if not isinstance(transcript.directory, str) or not transcript.directory.strip():
+        raise ConfigError(
+            "transcript.directory must be a non-empty path when transcripts are "
+            "configured; use a writable local directory such as runtime/transcripts"
+        )
+
+
 def _validate_port(port: object, label: str) -> None:
     if isinstance(port, bool) or not isinstance(port, int):
         raise ConfigError(f"{label} must be an integer (got {port!r})")
@@ -560,6 +597,10 @@ def _build_section(cls: type[_T], raw: object, section: str) -> _T:
 def _coerce_toml(value: object, default: object, label: str) -> object:
     if isinstance(default, str):
         return _coerce_str(value, label)
+    if isinstance(default, bool):
+        if not isinstance(value, bool):
+            raise ConfigError(f"{label} must be a boolean (got {value!r})")
+        return value
     if isinstance(default, int):
         if isinstance(value, bool) or not isinstance(value, int):
             raise ConfigError(f"{label} must be an integer (got {value!r})")
@@ -585,6 +626,7 @@ def _apply_env(config: Config, env: Mapping[str, str]) -> Config:
         "realtime": RealtimeConfig,
         "agent": AgentConfig,
         "server": ServerConfig,
+        "transcript": TranscriptConfig,
     }
 
     for name, raw in sorted(env.items()):
@@ -632,6 +674,13 @@ def _apply_env(config: Config, env: Mapping[str, str]) -> Config:
 def _coerce_env(raw: str, default: object, label: str) -> object:
     if isinstance(default, str):
         return raw
+    if isinstance(default, bool):
+        lowered = raw.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        raise ConfigError(f"{label} must be a boolean (got {raw!r})")
     if isinstance(default, int):
         try:
             return int(raw, 10)
