@@ -11,6 +11,12 @@ utterances, sends a clearly marked placeholder transcript to the brain, and logs
 the reply instead of playing it. Use that mode to verify call control and VAD
 wiring. It is not a conversation. Pass real adapters to hear the agent.
 
+The optional deliberative path replaces the single ``reply`` call with a
+:class:`~telephone_agent.actions.DeliberativeBrain` that may speak, request one
+mid-call consultation, or hang up. The call thread blocks on
+:class:`~telephone_agent.consult.ConsultationBroker` until the async side answers.
+A ``stop_event`` is checked only between audio frames, never during a turn.
+
 Known v0 limitations:
 
 * No barge-in. Playback is synchronous, so the microphone is not drained while
@@ -25,24 +31,34 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from .actions import Action, Consult, DeliberativeBrain, HangUp, Speak
 from .audio import AudioDevice
 from .brain import Brain
 from .config import ensure_e164
+from .consult import Consultation, ConsultationBroker, ConsultationOutcome
 from .dialer import Dialer, mask_number
 from .vad import Endpointer
 
 __all__ = [
+    "AgentReply",
     "CallEndReason",
+    "CallFinished",
     "CallResult",
     "CallSession",
     "CallState",
+    "ConsultationFinished",
+    "ConsultationStarted",
+    "SessionEvent",
+    "StateChanged",
     "Synthesizer",
     "Transcriber",
+    "Utterance",
 ]
 
 logger = logging.getLogger(__name__)
@@ -107,13 +123,66 @@ class CallResult:
     turns: int
 
 
+@dataclass(frozen=True, slots=True)
+class StateChanged:
+    """Emitted after the call state changes."""
+
+    state: CallState
+
+
+@dataclass(frozen=True, slots=True)
+class Utterance:
+    """Emitted for each non-empty caller transcript."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentReply:
+    """Emitted when the agent has a non-empty reply to speak."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConsultationStarted:
+    """Emitted when a mid-call consultation is registered."""
+
+    consultation: Consultation
+
+
+@dataclass(frozen=True, slots=True)
+class ConsultationFinished:
+    """Emitted when a mid-call consultation is resolved."""
+
+    outcome: ConsultationOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class CallFinished:
+    """Emitted immediately before :meth:`CallSession.run` returns."""
+
+    result: CallResult
+
+
+SessionEvent = (
+    StateChanged
+    | Utterance
+    | AgentReply
+    | ConsultationStarted
+    | ConsultationFinished
+    | CallFinished
+)
+
+
 class CallSession:
     """Run one outbound call from dialing through hangup.
 
     Args:
         audio: Call audio backend (USB gadget or Bluetooth HFP).
         dialer: Helper client that places and ends the call.
-        brain: Text-in, text-out conversation brain.
+        brain: Text-in, text-out conversation brain. Mutually exclusive with
+            *deliberative*.
         number: E.164 destination number.
         max_call_seconds: Hard limit on call duration.
         silence_timeout_s: Hang up after this much silence with no active
@@ -124,6 +193,16 @@ class CallSession:
         synthesizer: Optional text-to-speech adapter. Without one replies are
             logged, not played.
         clock: Monotonic clock, injectable for tests.
+        deliberative: Optional action-returning brain. Requires *consultations*.
+        consultations: Broker used by a deliberative brain for mid-call
+            questions.
+        consult_timeout_s: Default timeout for consultations that do not set
+            their own.
+        holding_phrase: Spoken before a consultation starts.
+        on_event: Optional observer for session events. Observer exceptions are
+            logged and ignored.
+        stop_event: Optional event checked between audio frames. Setting it ends
+            the call as interrupted.
 
     A session may be run only once.
     """
@@ -133,7 +212,7 @@ class CallSession:
         *,
         audio: AudioDevice,
         dialer: Dialer,
-        brain: Brain,
+        brain: Brain | None = None,
         number: str,
         max_call_seconds: float = 300.0,
         silence_timeout_s: float = 20.0,
@@ -141,7 +220,17 @@ class CallSession:
         transcriber: Transcriber | None = None,
         synthesizer: Synthesizer | None = None,
         clock: Callable[[], float] = time.monotonic,
+        deliberative: DeliberativeBrain | None = None,
+        consultations: ConsultationBroker | None = None,
+        consult_timeout_s: float = 8.0,
+        holding_phrase: str = "One moment please.",
+        on_event: Callable[[SessionEvent], None] | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
+        if (brain is None) == (deliberative is None):
+            raise ValueError("exactly one of brain or deliberative must be provided")
+        if deliberative is not None and consultations is None:
+            raise ValueError("deliberative requires a ConsultationBroker")
         if not math.isfinite(max_call_seconds) or max_call_seconds <= 0:
             raise ValueError(f"max_call_seconds must be a positive number (got {max_call_seconds})")
         if not math.isfinite(silence_timeout_s) or silence_timeout_s <= 0:
@@ -150,6 +239,12 @@ class CallSession:
             )
         if not -100.0 <= vad_threshold <= 0.0:
             raise ValueError(f"vad_threshold must be between -100 and 0 dBFS (got {vad_threshold})")
+        if not math.isfinite(consult_timeout_s) or consult_timeout_s <= 0:
+            raise ValueError(
+                f"consult_timeout_s must be a positive number (got {consult_timeout_s})"
+            )
+        if not holding_phrase.strip():
+            raise ValueError("holding_phrase must not be empty or whitespace")
 
         self.audio = audio
         self.dialer = dialer
@@ -161,9 +256,16 @@ class CallSession:
         self._transcriber = transcriber
         self._synthesizer = synthesizer
         self._clock = clock
+        self._deliberative = deliberative
+        self._consultations = consultations
+        self._consult_timeout_s = consult_timeout_s
+        self._holding_phrase = holding_phrase
+        self._on_event = on_event
+        self._stop_event = stop_event
         self._state = CallState.IDLE
         self._ran = False
         self._dial_attempted = False
+        self._hangup_requested = False
         self._warned_no_transcriber = False
         self._warned_no_synthesizer = False
 
@@ -210,6 +312,9 @@ class CallSession:
             deadline = started + self.max_call_seconds
             try:
                 for frame in frames:
+                    if self._stop_event is not None and self._stop_event.is_set():
+                        reason = CallEndReason.INTERRUPTED
+                        break
                     now = self._clock()
                     if now >= deadline:
                         reason = CallEndReason.MAX_DURATION
@@ -227,6 +332,9 @@ class CallSession:
                             logger.exception("conversation turn failed")
                             reason = CallEndReason.TURN_FAILED
                             final_state = CallState.FAILED
+                            break
+                        if self._hangup_requested:
+                            reason = CallEndReason.COMPLETED
                             break
                         last_activity = self._clock()
                         if last_activity >= deadline:
@@ -278,11 +386,13 @@ class CallSession:
             result.turns,
             result.duration_s,
         )
+        self._emit(CallFinished(result))
         return result
 
     def _handle_utterance(self, pcm: bytes) -> None:
         transcript = self._transcribe(pcm)
-        if not transcript.strip():
+        text = transcript.strip()
+        if not text:
             logger.info("ignoring utterance: transcriber returned no text")
             return
         logger.debug(
@@ -290,15 +400,67 @@ class CallSession:
             len(pcm),
             len(transcript),
         )
+        self._emit(Utterance(text))
 
-        reply = self.brain.reply(transcript.strip())
+        if self._deliberative is not None:
+            action = self._deliberative.decide(text)
+            self._handle_action(action, depth=0)
+            return
+
+        if self.brain is None:  # pragma: no cover - constructor validates this
+            raise RuntimeError("no brain configured")
+        reply = self.brain.reply(text)
         if not isinstance(reply, str):
             raise TypeError("Brain.reply() must return str")
-        text = reply.strip()
-        if not text:
+        reply_text = reply.strip()
+        if not reply_text:
             logger.warning("brain returned an empty reply")
             return
-        self._speak(text)
+        self._emit(AgentReply(reply_text))
+        self._speak(reply_text)
+
+    def _handle_action(self, action: Action, *, depth: int) -> None:
+        if isinstance(action, Speak):
+            text = action.text.strip()
+            if not text:
+                logger.warning("deliberative brain returned an empty reply")
+                return
+            self._emit(AgentReply(text))
+            self._speak(text)
+            return
+
+        if isinstance(action, HangUp):
+            self._hangup_requested = True
+            logger.info("deliberative brain requested hangup: %s", action.reason)
+            return
+
+        if isinstance(action, Consult):
+            if depth > 0:
+                raise RuntimeError("a consultation cannot request another consultation")
+            question = action.question.strip()
+            if not question:
+                logger.warning("deliberative brain requested an empty consultation")
+                return
+            timeout_s = (
+                action.timeout_s if action.timeout_s is not None else self._consult_timeout_s
+            )
+            self._speak(self._holding_phrase)
+            if self._consultations is None:  # pragma: no cover - constructor validates this
+                raise RuntimeError("no ConsultationBroker configured")
+            outcome = self._consultations.ask(
+                question,
+                timeout_s,
+                on_open=lambda consultation: self._emit(ConsultationStarted(consultation)),
+            )
+            self._emit(ConsultationFinished(outcome))
+            if outcome.answer is None:
+                next_action = self._deliberative.on_consult_timeout()
+            else:
+                next_action = self._deliberative.resume(outcome.answer)
+            self._handle_action(next_action, depth=depth + 1)
+            return
+
+        raise TypeError("DeliberativeBrain must return Speak, Consult, or HangUp")
 
     def _transcribe(self, pcm: bytes) -> str:
         if self._transcriber is None:
@@ -343,6 +505,15 @@ class CallSession:
         self.audio.play(bytes(pcm))
 
     def _reset_brain(self) -> None:
+        if self._deliberative is not None:
+            try:
+                self._deliberative.reset()
+            except Exception:
+                logger.warning("DeliberativeBrain.reset() failed; continuing", exc_info=True)
+            return
+
+        if self.brain is None:  # pragma: no cover - constructor validates this
+            return
         reset = getattr(self.brain, "reset", None)
         if not callable(reset):
             return
@@ -374,3 +545,12 @@ class CallSession:
             return
         logger.debug("state %s -> %s", self._state, state)
         self._state = state
+        self._emit(StateChanged(state))
+
+    def _emit(self, event: SessionEvent) -> None:
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(event)
+        except Exception:
+            logger.warning("session event observer failed; continuing", exc_info=True)
