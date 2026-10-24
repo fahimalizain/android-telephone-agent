@@ -128,6 +128,11 @@ class RealtimeConfig:
     ``XAI_API_KEY`` environment variable, so the key never has to live in the
     repository or the TOML file. ``base_url`` is the WebSocket endpoint without
     the model query parameter.
+
+    ``greeting`` is an optional opening line. The adapter requests it once,
+    after the call audio backend is ready, so a scheduled outbound call does not
+    wait for the callee to speak first. An empty value preserves the
+    listen-first behavior.
     """
 
     kind: str = "off"
@@ -136,6 +141,7 @@ class RealtimeConfig:
     model: str = "grok-voice-latest"
     voice: str = "eve"
     instructions: str = ""
+    greeting: str = ""
     language: str = ""
     reasoning_effort: str = "none"
     vad_threshold: float = 0.5
@@ -396,6 +402,8 @@ def _validate_brain(brain: BrainConfig) -> None:
 
 
 _REALTIME_RATES = {8_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000}
+_GREETING_MAX_CHARS = 300
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _validate_realtime(realtime: RealtimeConfig, audio: AudioConfig) -> None:
@@ -406,6 +414,15 @@ def _validate_realtime(realtime: RealtimeConfig, audio: AudioConfig) -> None:
         )
     if realtime.kind == "off":
         return
+
+    greeting = realtime.greeting.strip()
+    if _CONTROL_CHARACTERS.search(realtime.greeting):
+        raise ConfigError("realtime.greeting must be a single line without control characters")
+    if len(greeting) > _GREETING_MAX_CHARS:
+        raise ConfigError(
+            f"realtime.greeting must be at most {_GREETING_MAX_CHARS} characters "
+            f"after trimming whitespace (got {len(greeting)})"
+        )
 
     _validate_ws_url(realtime.base_url, "realtime.base_url")
     if not realtime.model.strip():

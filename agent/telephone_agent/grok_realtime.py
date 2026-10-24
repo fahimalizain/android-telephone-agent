@@ -597,6 +597,7 @@ class GrokRealtimeSession:
         self._hangup_requested = False
         self._hangup_deadline = 0.0
         self._response_done = False
+        self._greeting_sent = False
         self._connection: RealtimeConnection | None = None
         self._playback: PlaybackSink | None = None
         self._last_event_at = 0.0
@@ -651,6 +652,7 @@ class GrokRealtimeSession:
 
             self._playback = self._playback_factory(self.audio)
             self.audio.start()
+            self._request_greeting()
             self._last_event_at = self._clock()
             deadline = started + self.max_call_seconds
             frames = self.audio.frames()
@@ -955,6 +957,47 @@ class GrokRealtimeSession:
         connection = self._connection
         if connection is None:
             return
+        connection.send_json({"type": "response.create"})
+
+    def _request_greeting(self) -> None:
+        """Ask the model to open the call with ``realtime.greeting``.
+
+        The caller must invoke this only after ``audio.start()`` returns, when
+        the audio backend can actually play the synthesized response. It is
+        safe to call more than once: the greeting is requested at most once
+        per session. An empty greeting sends nothing, preserving listen-first
+        behavior.
+        """
+
+        if self._greeting_sent:
+            return
+        connection = self._connection
+        greeting = self.config.greeting.strip()
+        if connection is None or not greeting:
+            return
+
+        self._greeting_sent = True
+        logger.info("requested opening greeting")
+        connection.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "The call has just connected. Open the "
+                                "conversation by saying exactly this greeting, "
+                                "then stop and let the callee respond: "
+                                f"{json.dumps(greeting)}"
+                            ),
+                        }
+                    ],
+                },
+            }
+        )
         connection.send_json({"type": "response.create"})
 
     def _close_playback(self) -> None:

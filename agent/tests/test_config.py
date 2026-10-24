@@ -239,6 +239,8 @@ def test_environment_overrides_realtime(tmp_path: Path) -> None:
         ('[realtime]\nkind = "grok"\nprefix_padding_ms = -1', "prefix_padding_ms"),
         ('[realtime]\nkind = "grok"\nsilence_duration_ms = -1', "silence_duration_ms"),
         ('[realtime]\nkind = "grok"\nidle_timeout_ms = -1', "idle_timeout_ms"),
+        ('[realtime]\nkind = "grok"\ngreeting = "line\\nbreak"', "control characters"),
+        ('[realtime]\nkind = "grok"\ngreeting = "' + "x" * 301 + '"', "at most 300"),
     ],
 )
 def test_realtime_validation(

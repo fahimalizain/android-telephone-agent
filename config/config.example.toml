@@ -95,6 +95,12 @@ voice = "eve"
 # Optional system prompt. Empty uses the adapter's concise telephone prompt.
 instructions = ""
 
+# Optional opening line, spoken once as soon as the call audio is ready: after
+# the phone answers and the ALSA device or Bluetooth SCO nodes start, before the
+# adapter streams call frames. Empty waits for the callee to speak first.
+# Example: "Hello, this is the telephone agent calling about your appointment."
+greeting = ""
+
 # Optional BCP-47 transcription hint, for example "en-IN". The adapter passes it
 # to Grok's input transcription; unsupported codes fall back to auto-detection.
 # Malayalam is not in xAI's documented realtime language list as of 2026-10.

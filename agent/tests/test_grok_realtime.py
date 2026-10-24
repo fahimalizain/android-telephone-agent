@@ -6,7 +6,7 @@ import base64
 import json
 import threading
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -98,9 +98,12 @@ class FakeAudio:
         self.playback = playback
         self.started = 0
         self.stopped = 0
+        self.on_start: Callable[[], None] | None = None
 
     def start(self) -> None:
         self.started += 1
+        if self.on_start is not None:
+            self.on_start()
 
     def stop(self) -> None:
         self.stopped += 1
@@ -212,6 +215,86 @@ def test_build_session_update_omits_consult_without_a_broker() -> None:
 
     assert [tool["name"] for tool in update["session"]["tools"]] == ["end_call"]
     assert "consult tool" not in update["session"]["instructions"]
+
+
+def test_greeting_is_requested_after_audio_starts() -> None:
+    greeting = "Hello, this is the telephone agent calling about your appointment."
+    session, connection, audio, _playback, _dialer = _make_session(
+        events=[
+            _event({"type": "session.updated"}),
+            _event({"type": "response.created"}),
+            _event({"type": "response.done"}),
+        ],
+        config=_config(greeting=greeting),
+    )
+    sent_before_start: list[int] = []
+    audio.on_start = lambda: sent_before_start.append(len(connection.sent_json))
+
+    session.run()
+
+    # The session.update is the only event sent before the audio backend is
+    # ready; the greeting must not be synthesized into a dead call.
+    assert sent_before_start == [1]
+    assert connection.sent_json[0]["type"] == "session.update"
+
+    greeting_events = [
+        event for event in connection.sent_json if event.get("type") == "conversation.item.create"
+    ]
+    assert len(greeting_events) == 1
+    item = greeting_events[0]["item"]
+    assert item["type"] == "message"
+    assert item["role"] == "system"
+    assert item["content"][0]["type"] == "input_text"
+    assert greeting in item["content"][0]["text"]
+
+    index = connection.sent_json.index(greeting_events[0])
+    assert connection.sent_json[index + 1] == {"type": "response.create"}
+
+
+def test_empty_greeting_sends_nothing() -> None:
+    session, connection, _audio, _playback, _dialer = _make_session(
+        events=[
+            _event({"type": "session.updated"}),
+            _event({"type": "response.created"}),
+            _event({"type": "response.done"}),
+        ],
+    )
+
+    session.run()
+
+    assert [
+        event for event in connection.sent_json if event.get("type") == "conversation.item.create"
+    ] == []
+    assert [event for event in connection.sent_json if event.get("type") == "response.create"] == []
+
+
+def test_greeting_is_requested_only_once() -> None:
+    greeting = "Hello there."
+    session, connection, audio, _playback, _dialer = _make_session(
+        events=[
+            _event({"type": "session.updated"}),
+            _event({"type": "response.created"}),
+            _event({"type": "response.done"}),
+            _event({"type": "input_audio_buffer.speech_started"}),
+            _event({"type": "response.created"}),
+            _event({"type": "response.done"}),
+        ],
+        config=_config(greeting=greeting),
+    )
+
+    def request_twice() -> None:
+        session._request_greeting()
+        session._request_greeting()
+
+    audio.on_start = request_twice
+
+    session.run()
+
+    greeting_events = [
+        event for event in connection.sent_json if event.get("type") == "conversation.item.create"
+    ]
+    assert len(greeting_events) == 1
+    assert sum(1 for event in connection.sent_json if event.get("type") == "response.create") == 1
 
 
 def test_run_streams_audio_and_emits_transcripts() -> None:

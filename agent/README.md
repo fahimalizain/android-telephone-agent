@@ -180,6 +180,7 @@ actionable message.
 | `realtime` | `model` | `grok-voice-latest` | Realtime model; pin a version such as `grok-voice-3.0` for reproducibility. |
 | `realtime` | `voice` | `eve` | Built-in voice id or a custom xAI voice id. |
 | `realtime` | `instructions` | built-in prompt | Optional system prompt. Empty uses the concise telephone prompt. |
+| `realtime` | `greeting` | empty | Optional opening line requested once after the call audio backend is ready. Empty waits for the callee to speak first. |
 | `realtime` | `language` | empty | Optional BCP-47 transcription hint. Malayalam is not in xAI's documented realtime list as of 2026-10. |
 | `realtime` | `reasoning_effort` | `none` | `none` minimizes latency; `high` enables model reasoning. |
 | `realtime` | `vad_threshold` | `0.5` | Server VAD speech probability, 0-1. This is not the dBFS `agent.vad_threshold`. |
@@ -434,6 +435,9 @@ Enable it in the TOML file:
 kind = "grok"
 model = "grok-voice-latest"
 voice = "eve"
+# Optional: spoken once after the call audio is ready. Empty waits for the
+# callee to speak first.
+greeting = "Hello, this is the telephone agent calling about your appointment."
 # Optional: prefer XAI_API_KEY in the service environment instead.
 # api_key = ""
 ```
@@ -461,6 +465,17 @@ does not depend on the local energy detector. The model can call two tools:
 `end_call` (after saying goodbye) and, on a delegated `serve` call, `consult`
 (the same `ConsultationBroker` used by the deliberative text brain). The call
 objective from MCP/A2A is included in the system instructions.
+
+When `realtime.greeting` is set, the adapter requests one opening turn from the
+model immediately after `audio.start()` succeeds, before it enters the audio
+frame loop. That ordering matters: for Bluetooth the SCO nodes exist only once
+the call is active, and speaking earlier would synthesize audio into a dead
+uplink. The request adds a system-role conversation item asking the model to say
+the configured line, followed by `response.create`; it is sent once per session.
+This lets scheduled outbound calls open the conversation instead of waiting for
+the callee. The inbound-call path will reuse the same helper after its own audio
+setup. A blank `greeting` sends no events and preserves the listen-first
+behavior.
 
 Caveats:
 

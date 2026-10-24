@@ -256,6 +256,15 @@ sent as binary PCM16 at 16 kHz; server VAD handles endpointing and barge-in, and
 the adapter stops local playback on speech onset. Two function tools are
 available: `end_call` and, for delegated calls, `consult`.
 
+`realtime.greeting` optionally makes the agent speak first. Once the call audio
+backend is ready (`audio.start()` returns: the ALSA device is open or the
+Bluetooth SCO nodes exist) and before any call frames are streamed, the adapter
+sends one system-role `conversation.item.create` asking the model to deliver the
+configured line, followed by a single `response.create`. An empty greeting (the
+default) sends neither event and preserves listen-first behavior. Scheduled
+outbound calls use this to open the conversation; the inbound-call path will use
+the same helper after its own audio setup.
+
 xAI's documented realtime languages include English, Hindi, and Bengali but not
 Malayalam as of 2026-10. Test Malayalam-English code-mixing before relying on
 this path, and prefer the provider evaluated in the rest of this document when
