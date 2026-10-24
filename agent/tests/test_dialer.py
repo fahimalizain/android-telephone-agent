@@ -246,6 +246,103 @@ def test_hangup_posts_to_hangup(monkeypatch: pytest.MonkeyPatch) -> None:
     assert json.loads(request.data or b"{}") == {}
 
 
+def test_state_uses_get_and_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install(monkeypatch, [FakeResponse(b'{"state":"ringing"}')])
+    dialer = Dialer("http://helper:8080", "test-token")
+
+    assert dialer.state() == {"state": "ringing"}
+
+    request, timeout = calls[0]
+    assert request.full_url == "http://helper:8080/state"
+    assert request.get_method() == "GET"
+    assert _header(request, "Authorization") == "Bearer test-token"
+    assert _header(request, "Accept") == "application/json"
+    assert timeout == 10.0
+
+
+@pytest.mark.parametrize("state", ["idle", "ringing", "offhook", "unknown"])
+def test_state_accepts_every_documented_phase(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    _install(monkeypatch, [FakeResponse(json.dumps({"state": state}).encode())])
+    dialer = Dialer("http://helper:8080", "test-token")
+
+    assert dialer.state() == {"state": state}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{}",
+        b'{"state":null}',
+        b'{"state":1}',
+        b'{"state":"busy"}',
+        b'{"state":"RINGING"}',
+    ],
+)
+def test_state_rejects_malformed_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+) -> None:
+    _install(monkeypatch, [FakeResponse(body)])
+    dialer = Dialer("http://helper:8080", "test-token")
+
+    with pytest.raises(DialerError, match="invalid call state") as info:
+        dialer.state()
+
+    assert info.value.status == 200
+    assert info.value.body
+
+
+def test_answer_posts_an_empty_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install(monkeypatch, [FakeResponse(b'{"state":"answering"}', status=202)])
+    dialer = Dialer("http://helper:8080", "test-token")
+
+    assert dialer.answer() == {"state": "answering"}
+
+    request, _ = calls[0]
+    assert request.full_url == "http://helper:8080/answer"
+    assert request.get_method() == "POST"
+    assert _header(request, "Authorization") == "Bearer test-token"
+    assert _header(request, "Content-Type") == "application/json"
+    assert json.loads(request.data or b"{}") == {}
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (409, b'{"error":"no ringing call"}'),
+        (403, b'{"error":"answer permission denied"}'),
+    ],
+)
+def test_answer_4xx_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    body: bytes,
+) -> None:
+    calls = _install(monkeypatch, [_http_error(status, body)])
+    dialer = Dialer("http://helper:8080", "test-token", retries=5, backoff_s=0.0)
+
+    with pytest.raises(DialerError) as info:
+        dialer.answer()
+
+    assert len(calls) == 1
+    assert info.value.status == status
+    assert info.value.body == body.decode()
+
+
+def test_answer_500_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install(
+        monkeypatch,
+        [_http_error(500, b'{"error":"answer failed"}'), FakeResponse(b'{"state":"answering"}')],
+    )
+    dialer = Dialer("http://helper:8080", "test-token", retries=1, backoff_s=0.0)
+
+    assert dialer.answer() == {"state": "answering"}
+    assert len(calls) == 2
+
+
 def test_timeout_is_passed(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install(monkeypatch, [FakeResponse()])
     dialer = Dialer("http://helper:8080", "test-token", timeout_s=3.5)

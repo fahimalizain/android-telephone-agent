@@ -34,6 +34,7 @@ USB or Android specification enforces them.
 | [Power and thermal](power-and-thermal.md) | Power topology, UPS coverage, phone battery care, and thermal limits. |
 | [Raspberry Pi setup](raspberry-pi-setup.md) | OS image, boot configuration, USB gadget setup, and service installation. |
 | [Bluetooth HFP](bluetooth-hfp.md) | Alternative audio transport: WirePlumber roles, pairing, SCO nodes, audio test, agent configuration, and user-session deployment. |
+| [Inbound calls](inbound.md) | Helper `/state` and `/answer`, the inbound watcher, auto-answer privacy limits, systemd user unit, and inbound transcripts. |
 | [Android setup](android-setup.md) | Phone A configuration for unattended calls, SIM selection, and USB audio routing. |
 | [Dial helper](dial-helper.md) | Reference helper app, its LAN API, bearer-token authentication, and call-control limits. |
 | [Voice agent](voice-agent.md) | Capture, voice activity detection, STT, LLM, TTS, playback, barge-in, and timeouts, plus the realtime speech-to-speech alternative. |

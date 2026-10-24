@@ -533,11 +533,17 @@ class _PlaybackPump:
 
 
 class GrokRealtimeSession:
-    """Run one outbound call on the Grok Voice speech-to-speech API.
+    """Run one outbound or inbound call on the Grok Voice speech-to-speech API.
 
     Args are the same as :class:`~telephone_agent.pipeline.CallSession`, with
     *config* replacing the brain and speech adapters. *connection_factory* and
     *playback_factory* are test seams; production callers leave them unset.
+
+    Set ``place_call=False`` for an inbound call that the helper has already
+    answered. The adapter then skips ``dialer.place_call`` and opens the
+    realtime session on the active call; *number* may be empty because the
+    helper does not expose caller ID. Teardown still calls ``dialer.hangup()``
+    for either direction.
     """
 
     def __init__(
@@ -558,6 +564,7 @@ class GrokRealtimeSession:
         clock: Callable[[], float] = time.monotonic,
         connection_factory: Callable[[], RealtimeConnection] | None = None,
         playback_factory: Callable[[AudioDevice], PlaybackSink] | None = None,
+        place_call: bool = True,
     ) -> None:
         if config.kind != "grok":
             raise ValueError("GrokRealtimeSession requires realtime.kind = 'grok'")
@@ -576,7 +583,8 @@ class GrokRealtimeSession:
 
         self.audio = audio
         self.dialer = dialer
-        self.number = ensure_e164(number)
+        self._place_call = place_call
+        self.number = ensure_e164(number) if place_call or number else ""
         self.config = config
         self.objective = objective.strip()
         self._consultations = consultations
@@ -628,13 +636,19 @@ class GrokRealtimeSession:
         final_state = CallState.IDLE
 
         try:
-            self._set_state(CallState.DIALING)
-            logger.info("placing call to %s", mask_number(self.number))
-            self._dial_attempted = True
-            self.dialer.place_call(self.number)
-
-            self._set_state(CallState.IN_CALL)
-            logger.info("call placed; opening Grok Voice realtime session")
+            if self._place_call:
+                self._set_state(CallState.DIALING)
+                logger.info("placing call to %s", mask_number(self.number))
+                self._dial_attempted = True
+                self.dialer.place_call(self.number)
+                self._set_state(CallState.IN_CALL)
+                logger.info("call placed; opening Grok Voice realtime session")
+            else:
+                # The watcher already answered the inbound call. Mark the call
+                # as active so teardown still asks the helper to hang it up.
+                self._dial_attempted = True
+                self._set_state(CallState.IN_CALL)
+                logger.info("inbound call active; opening Grok Voice realtime session")
 
             connection = self._connection_factory()
             self._connection = connection

@@ -1,0 +1,26 @@
+[Unit]
+Description=Telephone agent inbound call watcher (Grok Voice)
+Documentation=https://github.com/fahimalizain/android-telephone-agent
+# Run this as a systemd *user* unit. The agent must share the PipeWire and
+# WirePlumber session that owns the Bluetooth SCO nodes; a system unit running
+# as another user cannot reach that session. Inbound and outbound calls are
+# mutually exclusive: do not enable this unit together with a dialing timer.
+After=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+# %h is the user's home directory. Change the paths if the repository lives
+# elsewhere. The root .venv must contain the telephone-agent console script.
+WorkingDirectory=%h/android-telephone-agent
+EnvironmentFile=-%h/android-telephone-agent/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/android-telephone-agent/.venv/bin/telephone-agent --config %h/android-telephone-agent/config/config.toml inbound
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

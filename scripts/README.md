@@ -21,6 +21,7 @@ checkout unless a path says otherwise. The setup guide is
 | `systemd/telephone-agent.timer` | Daily call schedule. | Edit `OnCalendar`, then `sudo systemctl enable --now telephone-agent.timer`. |
 | `systemd/telephone-agent-bluetooth.service` | One outbound call for the Bluetooth backend, as a systemd **user** unit so it shares PipeWire. | Copy to `~/.config/systemd/user/`; see `docs/bluetooth-hfp.md`. |
 | `systemd/telephone-agent-bluetooth.timer` | Daily call schedule for the Bluetooth user unit. | Copy to `~/.config/systemd/user/`, edit `OnCalendar`, then `systemctl --user enable --now telephone-agent-bluetooth.timer`. |
+| `systemd/telephone-agent-inbound.service` | Long-lived inbound call watcher for the Bluetooth backend, as a systemd **user** unit sharing the user's PipeWire session. Uses the repository root `.venv`. | Copy to `~/.config/systemd/user/`, then `systemctl --user enable --now telephone-agent-inbound.service`; see `docs/inbound.md`. |
 
 ## Bluetooth HFP alternative
 
@@ -145,6 +146,28 @@ systemctl --user enable --now pipewire wireplumber
 
 The Bluetooth unit is separate from the USB gadget unit. Do not enable both for
 the same phone and call slot.
+
+### Inbound watcher user service
+
+`systemd/telephone-agent-inbound.service` runs the long-lived `inbound` command
+for the Bluetooth backend. It is also a systemd **user** unit, so it shares the
+user's PipeWire/WirePlumber session and can see the SCO nodes after a call is
+answered. It uses the repository root `.venv/bin/telephone-agent`, not the stale
+`agent/.venv` path in the older Bluetooth unit.
+
+```sh
+mkdir -p ~/.config/systemd/user
+install -m644 scripts/systemd/telephone-agent-inbound.service \
+  ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now telephone-agent-inbound.service
+journalctl --user -u telephone-agent-inbound.service -n 100 --no-pager
+```
+
+Enable lingering as above on a headless host. Inbound and outbound calls are
+mutually exclusive on one phone: do not enable this unit together with the
+Bluetooth timer or a `run` timer. The watcher answers every ringing call on the
+agent SIM, with no caller ID. Read `docs/inbound.md` before enabling it.
 
 ## Notes
 

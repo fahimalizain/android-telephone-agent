@@ -52,6 +52,21 @@ timeout_s = 10.0
 # Bounded to 5.
 retries = 2
 
+[inbound]
+# The `inbound` command polls the helper's GET /state endpoint and answers
+# every ringing call on the agent's SIM with POST /answer. It then runs one
+# Grok Voice realtime session per answered call. This is auto-answer: there is
+# no caller-ID filter, allowlist, or screening, because the helper does not
+# request READ_CALL_LOG and returns no caller number. Only enable it on a SIM
+# dedicated to the agent, and review docs/inbound.md before deploying.
+#
+# Seconds between GET /state polls. 0.2-30; one second is a good default.
+poll_interval_s = 1.0
+# Seconds to wait after seeing `ringing` before answering. 0-30; the watcher
+# re-checks the state after the delay and does not answer if the call already
+# stopped ringing or was answered manually. Zero answers as soon as possible.
+answer_delay_s = 0.0
+
 [brain]
 # "echo" returns a short echo and is intended for loopback testing.
 # "http" targets any OpenAI-compatible /chat/completions endpoint.

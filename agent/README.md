@@ -1,10 +1,11 @@
 # Telephone agent runtime
 
-This directory contains the reference Python runtime for the outbound call agent
+This directory contains the reference Python runtime for the telephone voice agent
 described in the [design brief](../docs/design-brief.md). It runs on the
 Raspberry Pi next to Phone A, captures and plays audio through the USB Audio
-Class gadget or a Bluetooth HFP SCO link, and asks a small LAN helper to place
-and end the cellular call.
+Class gadget or a Bluetooth HFP SCO link, and asks a small LAN helper to place,
+answer, and end the cellular call. Outbound calls are placed by the agent;
+inbound calls are detected by polling the helper and are answered automatically.
 
 The runtime is deliberately small. It uses only the Python standard library at
 runtime; `pytest` and `ruff` are development dependencies. It is a scaffold for
@@ -46,7 +47,8 @@ below explain where the pieces belong.
   the systemd section below.
 - The phone-side helper app reachable on the LAN with a bearer token. The
   reference HTTP contract is documented in `telephone_agent/dialer.py`:
-  `GET /health`, `POST /call`, and `POST /hangup`.
+  `GET /health`, `GET /state`, `POST /call`, `POST /answer`, and `POST /hangup`.
+  Inbound answering also needs `ANSWER_PHONE_CALLS` on the phone.
 - Phone A configured to route call audio to the USB headset, or to the Bluetooth
   host with **Calls and audio** enabled. For USB, Developer options must not
   disable USB audio routing. Verify routing with the hardware loopback procedure
@@ -166,6 +168,8 @@ actionable message.
 | `dialer` | `token` | required | Bearer token sent with every helper request. Prefer an environment override. |
 | `dialer` | `timeout_s` | `10.0` | Per-request timeout. |
 | `dialer` | `retries` | `2` | Retries for 5xx and connection failures only, 0-5. 4xx is never retried. |
+| `inbound` | `poll_interval_s` | `1.0` | Seconds between helper `/state` polls for the `inbound` command, 0.2-30. |
+| `inbound` | `answer_delay_s` | `0.0` | Grace period after a `ringing` state before asking the helper to answer, 0-30. The state is re-checked first. |
 | `brain` | `kind` | `echo` | `echo` or `http`. |
 | `brain` | `base_url` | empty | Required for `http`; API root up to `/v1`. |
 | `brain` | `api_key` | empty | Optional for local OpenAI-compatible servers. |
@@ -292,6 +296,32 @@ See the next section to make it audible.
 The exit status is 0 for a completed call, 1 for a failed call or an interrupt,
 and 2 for a configuration error.
 
+### `inbound`
+
+```bash
+telephone-agent --config ../config/config.toml inbound
+telephone-agent --config ../config/config.toml inbound --once
+```
+
+Polls the helper's `GET /state` endpoint every `inbound.poll_interval_s` and
+answers every `ringing` call with `POST /answer`. After a successful answer it
+opens one Grok Voice realtime session on the call, then waits for the helper to
+report `idle` before re-arming. A call that is already `offhook` is never
+answered, because the user may have answered it manually. `--once` handles at
+most one call and exits.
+
+This command requires `realtime.kind = "grok"`; the text pipeline has no inbound
+audio path, and the command exits with status 2 otherwise. SIGTERM and SIGINT
+set a stop event that is passed to the active session, which ends the call and
+asks the helper to hang up. Helper failures are logged and retried with backoff;
+the watcher does not exit.
+
+There is **no caller ID** and no allowlist: the helper does not request
+`READ_CALL_LOG` and never returns a caller number. Every ringing call on the
+agent SIM is answered. Use a SIM dedicated to the agent and read
+[Inbound calls](../docs/inbound.md) before enabling it. Inbound and outbound
+calls are mutually exclusive on one phone.
+
 ### `--help`
 
 ```bash
@@ -361,11 +391,12 @@ retention rule and restrict access.
 
 ## Local call transcripts
 
-Set `[transcript].enabled = true` to persist one JSONL file per call from both
-`telephone-agent run` and every delegated call handled by `telephone-agent
-serve`. The default is off, and when off the runtime creates neither the
-directory nor a file. `directory` defaults to `runtime/transcripts`, relative to
-the process working directory; `runtime/` is already gitignored.
+Set `[transcript].enabled = true` to persist one JSONL file per call from
+`telephone-agent run`, `telephone-agent inbound`, and every delegated call
+handled by `telephone-agent serve`. The default is off, and when off the runtime
+creates neither the directory nor a file. `directory` defaults to
+`runtime/transcripts`, relative to the process working directory; `runtime/` is
+already gitignored.
 
 Files are named `YYYYmmddTHHMMSS-<short-id>.jsonl`, using local wall-clock time
 at the start of the call and the first eight safe characters of the call or task
@@ -380,7 +411,7 @@ events are:
 
 | `event` | Additional fields |
 |---|---|
-| `call_start` | `direction` (`outbound`), full E.164 `number`, `audio_backend`, `realtime_kind`, `objective` when non-empty, and `realtime_model`/`realtime_voice` for a Grok realtime call |
+| `call_start` | `direction` (`outbound` or `inbound`), `number` (full E.164 outbound; empty inbound because caller ID is unavailable), `audio_backend`, `realtime_kind`, `objective` when non-empty, and `realtime_model`/`realtime_voice` for a Grok realtime call |
 | `transcript` | `role` (`callee`) and verbatim `text` |
 | `reply` | `role` (`agent`) and verbatim `text` |
 | `call_end` | `state`, `reason`, `turns`, and `duration_s` |
@@ -519,9 +550,10 @@ the call is active, and speaking earlier would synthesize audio into a dead
 uplink. The request adds a system-role conversation item asking the model to say
 the configured line, followed by `response.create`; it is sent once per session.
 This lets scheduled outbound calls open the conversation instead of waiting for
-the callee. The inbound-call path will reuse the same helper after its own audio
-setup. A blank `greeting` sends no events and preserves the listen-first
-behavior.
+the callee. The inbound path in `__main__.py` builds the same adapter with
+`place_call=False`; it reuses the greeting ordering after its own audio setup
+and still asks the helper to hang up when the session ends. A blank `greeting`
+sends no events and preserves the listen-first behavior.
 
 Caveats:
 
@@ -623,6 +655,14 @@ running when no one is logged in. Do not enable the system USB unit and the
 Bluetooth user unit for the same call slot. The full deployment steps are in
 [Bluetooth HFP](../docs/bluetooth-hfp.md), section 10.
 
+The inbound watcher has its own long-lived user unit,
+`scripts/systemd/telephone-agent-inbound.service`. It uses the root
+`.venv/bin/telephone-agent`, shares the user's PipeWire/WirePlumber session, and
+restarts on failure because it polls for calls instead of dialing at startup.
+Inbound and outbound calls are mutually exclusive: do not enable the inbound
+unit together with an outbound timer on the same phone. Installation and
+privacy limits are in [Inbound calls](../docs/inbound.md).
+
 The design brief targets 24/7 operation with a hardware watchdog and volatile
 journald storage. Those are host-level settings; the one-shot unit above does
 not enable them. Do not add `Restart=always` until a scheduler guarantees one
@@ -668,10 +708,11 @@ workflow runs `ruff check` and `pytest` on Python 3.11, 3.12, and 3.13. Python
   noise, or a loud room can hold a turn open. Tune `agent.vad_threshold` and the
   endpointing constants in `vad.py` for the deployment. The realtime adapter
   uses Grok's server VAD instead.
-- **No answer detection.** The helper is assumed to return when the call is
-  placed, not when it is answered. Ringing time counts against
-  `agent.silence_timeout_s` and `agent.max_call_seconds`. If the helper can
-  report answer state, wire that in before production use.
+- **No outbound answer detection.** For outbound calls the helper is assumed to
+  return when the call is placed, not when it is answered. Ringing time counts
+  against `agent.silence_timeout_s` and `agent.max_call_seconds`. The inbound
+  watcher does use the helper's `/state` endpoint and answers ringing calls, but
+  outbound calls still need a separate answer signal for production use.
 - **No scheduler or durable idempotency.** One `run` is one call. The dialer
   retries 5xx and connection failures with an idempotency key, but the helper
   must honour that header to avoid a duplicate call.
@@ -682,6 +723,10 @@ workflow runs `ruff check` and `pytest` on Python 3.11, 3.12, and 3.13. Python
 - **Hangup may be unavailable.** Android restricts `TelecomManager.endCall()` on
   modern releases. If the helper cannot end the call, the remote party must hang
   up and the service cannot guarantee prompt teardown.
+- **Inbound auto-answer has no caller ID or screening.** The helper does not
+  request `READ_CALL_LOG`, so `/state` and `/answer` expose no number. Every
+  ringing call on the agent SIM is answered; use a dedicated SIM. See
+  [Inbound calls](../docs/inbound.md).
 - **Bluetooth HFP is an alternative, not the default.** It requires PipeWire and
   WirePlumber in the same user session, and the SCO nodes exist only during a
   call. The USB gadget remains the default and the more deterministic path.
@@ -756,11 +801,12 @@ agent/
   pyproject.toml          packaging, console script, ruff and pytest settings
   README.md               this file
   telephone_agent/
-    __main__.py           doctor, dial, run, serve, selftest
+    __main__.py           doctor, dial, run, inbound, serve, selftest
     config.py             TOML loading, environment overrides, validation
     audio.py              arecord/aplay and pw-record/pw-play backends, SCO discovery
     vad.py                RMS, dBFS, energy endpointer
     dialer.py             helper HTTP client with retries and idempotency
+    inbound.py            inbound call watcher (poll, answer, one session per call)
     actions.py            Speak/Consult/HangUp actions and BrainActionAdapter
     brain.py              Brain protocol, EchoBrain, HttpBrain, HttpDeliberativeBrain
     grok_realtime.py      independent xAI Grok Voice speech-to-speech adapter

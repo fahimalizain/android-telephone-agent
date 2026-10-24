@@ -16,10 +16,12 @@ from telephone_agent.__main__ import (
     _build_session_factory,
     _check_pipewire_tools,
     _cmd_doctor,
+    _cmd_inbound,
     _cmd_run,
     _cmd_selftest,
     _cmd_serve,
     _dialer_from_config,
+    _inbound_session_factory,
     _serve,
     _server_apps,
     build_parser,
@@ -38,6 +40,7 @@ from telephone_agent.config import (
     Config,
     ConfigError,
     DialerConfig,
+    InboundConfig,
     RealtimeConfig,
     ServerConfig,
     TranscriptConfig,
@@ -809,6 +812,137 @@ directory = "{directory}"
     assert "call ended: state=idle reason=completed turns=1 duration=4.5s" in captured.out
     assert "running one call to *******0100" in captured.out
     assert "+15555550100" not in captured.out + captured.err
+
+
+def test_inbound_subcommand_parses_and_dispatches(tmp_path: Path) -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["--config", str(tmp_path / "config.toml"), "inbound", "--once"])
+
+    assert args.command == "inbound"
+    assert args.config == str(tmp_path / "config.toml")
+    assert args.once is True
+    assert args.handler is _cmd_inbound
+
+
+def test_inbound_requires_the_grok_realtime_adapter(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path,
+        """
+[audio]
+card = "UAC1Gadget"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="realtime.kind = 'grok'"):
+        _cmd_inbound(argparse.Namespace(config=str(path), once=True))
+
+
+def test_inbound_wires_the_watcher_with_config_and_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_config(
+        tmp_path,
+        """
+[audio]
+card = "UAC1Gadget"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+
+[realtime]
+kind = "grok"
+
+[inbound]
+poll_interval_s = 0.5
+answer_delay_s = 1.5
+""",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeWatcher:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self) -> int:
+            return 1
+
+    monkeypatch.setattr("telephone_agent.__main__.InboundWatcher", FakeWatcher)
+    monkeypatch.setattr("telephone_agent.__main__._install_stop_handlers", lambda _event: {})
+    monkeypatch.setattr("telephone_agent.__main__._restore_signal_handlers", lambda _prev: None)
+
+    assert _cmd_inbound(argparse.Namespace(config=str(path), once=True)) == 0
+
+    assert isinstance(captured["config"], InboundConfig)
+    assert captured["config"].poll_interval_s == 0.5
+    assert captured["config"].answer_delay_s == 1.5
+    assert captured["once"] is True
+    assert callable(captured["session_factory"])
+    assert isinstance(captured["stop_event"], threading.Event)
+    assert "poll 0.5 s" in capsys.readouterr().out
+
+
+def test_inbound_session_factory_uses_an_inbound_transcript_and_realtime_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "transcripts"
+    config = Config(
+        audio=AudioConfig(card="UAC1Gadget"),
+        dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
+        realtime=RealtimeConfig(kind="grok"),
+        transcript=TranscriptConfig(enabled=True, directory=str(directory)),
+    )
+    captured: dict[str, object] = {}
+    ran: list[bool] = []
+
+    class FakeSession:
+        def run(self) -> None:
+            ran.append(True)
+
+    def fake_build(
+        built_config: Config,
+        audio: object,
+        dialer: object,
+        number: str,
+        **kwargs: object,
+    ) -> FakeSession:
+        captured["config"] = built_config
+        captured["audio"] = audio
+        captured["dialer"] = dialer
+        captured["number"] = number
+        captured.update(kwargs)
+        return FakeSession()
+
+    monkeypatch.setattr("telephone_agent.__main__._audio_from_config", lambda _config: object())
+    monkeypatch.setattr("telephone_agent.__main__._dialer_from_config", lambda _config: object())
+    monkeypatch.setattr("telephone_agent.__main__._build_realtime_session", fake_build)
+
+    stop_event = threading.Event()
+    session = _inbound_session_factory(config)(stop_event)
+    session.run()
+
+    assert ran == [True]
+    assert captured["number"] == ""
+    assert captured["place_call"] is False
+    assert captured["stop_event"] is stop_event
+    assert captured["config"] is config
+
+    paths = list(directory.glob("*.jsonl"))
+    assert len(paths) == 1
+    records = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines()]
+    assert records[0]["event"] == "call_start"
+    assert records[0]["direction"] == "inbound"
+    assert records[0]["number"] == ""
+    assert records[0]["realtime_kind"] == "grok"
+    assert "objective" not in records[0]
 
 
 def test_doctor_realtime_reports_missing_key(

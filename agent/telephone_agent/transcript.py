@@ -4,9 +4,10 @@ Each call gets its own JSONL file under the configured directory. A line is
 written for start, each callee utterance, each agent reply, and the final
 result. Audio is never written.
 
-The local transcript is intentionally complete: it contains the full E.164
-destination number, call metadata, and verbatim conversation text. It is not
-redacted. Operational logs remain masked. Treat every transcript file as
+The local transcript is intentionally complete: it contains the full phone
+number when one is known, call metadata, and verbatim conversation text. It is
+not redacted. Inbound calls have an empty ``number`` because the helper does not
+expose caller ID. Operational logs remain masked. Treat every transcript file as
 sensitive personal data: it is created with mode 0600 inside a directory with
 mode 0700 and must not be shipped off the device.
 
@@ -160,10 +161,11 @@ class TranscriptLogger:
         realtime_model: str = "",
         realtime_voice: str = "",
     ) -> None:
-        """Record the start of a call with the full destination and metadata.
+        """Record the start of a call with the full number and metadata.
 
         This is the local transcript, so *number* is stored exactly as supplied
-        rather than masked. The objective is included only when non-empty.
+        rather than masked. It is empty for an inbound call because caller ID is
+        unavailable. The objective is included only when non-empty.
         ``realtime_model`` and ``realtime_voice`` are included for a Grok
         realtime call.
         """

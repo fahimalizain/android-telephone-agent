@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -167,6 +168,8 @@ def _make_session(
     broker: FakeBroker | None = None,
     on_event: Any = None,
     stop_event: threading.Event | None = None,
+    number: str = _NUMBER,
+    place_call: bool = True,
 ) -> tuple[GrokRealtimeSession, FakeConnection, FakeAudio, FakePlayback, FakeDialer]:
     connection = FakeConnection(events)
     playback = FakePlayback()
@@ -175,13 +178,14 @@ def _make_session(
     session = GrokRealtimeSession(
         audio=audio,
         dialer=dialer,
-        number=_NUMBER,
+        number=number,
         config=config or _config(),
         consultations=broker,
         on_event=on_event,
         stop_event=stop_event,
         connection_factory=lambda: connection,
         playback_factory=lambda _audio: playback,
+        place_call=place_call,
     )
     return session, connection, audio, playback, dialer
 
@@ -295,6 +299,41 @@ def test_greeting_is_requested_only_once() -> None:
     ]
     assert len(greeting_events) == 1
     assert sum(1 for event in connection.sent_json if event.get("type") == "response.create") == 1
+
+
+def test_inbound_session_skips_place_call_but_still_hangs_up_and_greets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    greeting = "Hello, this is the telephone agent."
+    emitted: list[object] = []
+    session, connection, audio, _playback, dialer = _make_session(
+        events=[
+            _event({"type": "session.updated"}),
+            _event({"type": "response.created"}),
+            _event({"type": "response.done"}),
+        ],
+        config=_config(greeting=greeting),
+        number="",
+        place_call=False,
+        on_event=emitted.append,
+    )
+
+    with caplog.at_level(logging.INFO, logger="telephone_agent.grok_realtime"):
+        result = session.run()
+
+    assert result.state is CallState.IDLE
+    assert dialer.placed == []
+    assert dialer.hangups == 1
+    assert audio.started == 1
+    assert "inbound call active; opening Grok Voice realtime session" in caplog.text
+    greeting_events = [
+        event for event in connection.sent_json if event.get("type") == "conversation.item.create"
+    ]
+    assert len(greeting_events) == 1
+    assert greeting in greeting_events[0]["item"]["content"][0]["text"]
+    states = [event.state for event in emitted if isinstance(event, StateChanged)]
+    assert CallState.DIALING not in states
+    assert states[0] is CallState.IN_CALL
 
 
 def test_run_streams_audio_and_emits_transcripts() -> None:

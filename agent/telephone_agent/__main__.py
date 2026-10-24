@@ -14,6 +14,7 @@ import asyncio
 import importlib.util
 import logging
 import shutil
+import signal
 import sys
 import threading
 import uuid
@@ -32,6 +33,7 @@ from .grok_realtime import (
     GrokRealtimeSession,
     resolve_api_key,
 )
+from .inbound import InboundWatcher
 from .pipeline import CallEndReason, CallSession, CallState, SessionEvent
 from .service import CallService, CallTask, SessionFactory
 from .transcript import TranscriptLogger
@@ -47,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="telephone-agent",
         description=(
-            "Reference runtime for an outbound telephone voice agent. "
+            "Reference runtime for a telephone voice agent. "
             "The agent runs on a small Linux host and reaches Phone A through a "
             "USB audio gadget or a Bluetooth HFP headset link, plus a LAN helper app."
         ),
@@ -57,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  telephone-agent --config config/config.toml selftest\n"
             "  telephone-agent --config config/config.toml dial --number +15555550100\n"
             "  telephone-agent --config config/config.toml run\n"
+            "  telephone-agent --config config/config.toml inbound --once\n"
             "  telephone-agent --config config/config.toml serve"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -76,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{doctor,dial,run,serve,selftest}",
+        metavar="{doctor,dial,run,inbound,serve,selftest}",
     )
 
     doctor = subparsers.add_parser(
@@ -119,6 +122,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="destination in E.164 format; overrides phone_number in the config",
     )
     run.set_defaults(handler=_cmd_run)
+
+    inbound = subparsers.add_parser(
+        "inbound",
+        help="answer incoming calls and run the voice agent",
+        description=(
+            "Poll the helper for inbound calls, answer a ringing call, and run "
+            "one Grok Voice realtime session per answered call. Requires "
+            "realtime.kind = 'grok'; the text pipeline has no inbound path. "
+            "Every ringing call on the agent SIM is answered automatically."
+        ),
+    )
+    inbound.add_argument(
+        "--once",
+        action="store_true",
+        help="answer at most one call, then exit",
+    )
+    inbound.set_defaults(handler=_cmd_inbound)
 
     serve = subparsers.add_parser(
         "serve",
@@ -352,6 +372,117 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_inbound(args: argparse.Namespace) -> int:
+    config = load(Path(args.config))
+    if config.realtime.kind != "grok":
+        raise ConfigError(
+            "inbound requires realtime.kind = 'grok'; the text pipeline has no "
+            "inbound audio path. Set realtime.kind = 'grok' and configure the "
+            "Grok Voice adapter."
+        )
+
+    stop_event = threading.Event()
+    previous_handlers = _install_stop_handlers(stop_event)
+    try:
+        watcher = InboundWatcher(
+            dialer=_dialer_from_config(config.dialer),
+            session_factory=_inbound_session_factory(config),
+            stop_event=stop_event,
+            config=config.inbound,
+            once=bool(getattr(args, "once", False)),
+        )
+        print(
+            "listening for inbound calls "
+            f"(poll {config.inbound.poll_interval_s:g} s, "
+            f"answer delay {config.inbound.answer_delay_s:g} s)"
+        )
+        handled = watcher.run()
+    finally:
+        _restore_signal_handlers(previous_handlers)
+
+    print(f"inbound watcher stopped after {handled} answered call(s)")
+    return 0
+
+
+def _inbound_session_factory(config: Config) -> Callable[[threading.Event], _TranscriptSession]:
+    """Return a factory that builds one fresh session and transcript per call.
+
+    Called by :class:`InboundWatcher` after the helper has answered a call, so
+    the Bluetooth SCO audio nodes should exist by the time the session opens the
+    audio device. The inbound number is always empty: the helper does not expose
+    caller ID.
+    """
+
+    def build(stop_event: threading.Event) -> _TranscriptSession:
+        call_id = uuid.uuid4().hex
+        transcript = _open_transcript(
+            config,
+            call_id=call_id,
+            number="",
+            direction="inbound",
+        )
+
+        def handle_event(event: SessionEvent) -> None:
+            if transcript is not None:
+                transcript.record(event)
+
+        try:
+            audio = _audio_from_config(config)
+            dialer = _dialer_from_config(config.dialer)
+            session = _build_realtime_session(
+                config,
+                audio,
+                dialer,
+                "",
+                place_call=False,
+                stop_event=stop_event,
+                on_event=handle_event if transcript is not None else None,
+            )
+        except Exception:
+            if transcript is not None:
+                transcript.close()
+            raise
+        return _TranscriptSession(session, transcript)
+
+    return build
+
+
+class _TranscriptSession:
+    """Close a per-call transcript after the wrapped session finishes."""
+
+    def __init__(
+        self,
+        session: CallSession | GrokRealtimeSession,
+        transcript: TranscriptLogger | None,
+    ) -> None:
+        self._session = session
+        self._transcript = transcript
+
+    def run(self) -> Any:
+        try:
+            return self._session.run()
+        finally:
+            if self._transcript is not None:
+                self._transcript.close()
+
+
+def _install_stop_handlers(stop_event: threading.Event) -> dict[int, Any]:
+    """Map SIGTERM and SIGINT to *stop_event* when running on the main thread."""
+
+    previous: dict[int, Any] = {}
+    if threading.current_thread() is not threading.main_thread():
+        return previous
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous[signum] = signal.getsignal(signum)
+        signal.signal(signum, lambda _signum, _frame: stop_event.set())
+    return previous
+
+
+def _restore_signal_handlers(previous: dict[int, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
 def _cmd_selftest(args: argparse.Namespace) -> int:
     config = load(Path(args.config))
     audio = _audio_from_config(config)
@@ -564,15 +695,21 @@ def _open_transcript(
     *,
     call_id: str,
     number: str,
+    direction: str = "outbound",
     objective: str = "",
 ) -> TranscriptLogger | None:
-    """Create this call's complete local transcript when enabled."""
+    """Create this call's complete local transcript when enabled.
+
+    *direction* is ``outbound`` for calls placed by the agent or ``inbound``
+    for answered calls. Inbound *number* is empty because the helper does not
+    expose caller ID.
+    """
 
     if not config.transcript.enabled:
         return None
     transcript = TranscriptLogger(config.transcript.directory, call_id=call_id)
     transcript.call_start(
-        direction="outbound",
+        direction=direction,
         number=number,
         objective=objective,
         audio_backend=config.audio.backend,
@@ -626,6 +763,7 @@ def _build_realtime_session(
     stop_event: threading.Event | None = None,
     on_event: Callable[[SessionEvent], None] | None = None,
     max_call_seconds: float | None = None,
+    place_call: bool = True,
 ) -> GrokRealtimeSession:
     """Build the Grok Voice adapter without touching the text pipeline."""
 
@@ -644,6 +782,7 @@ def _build_realtime_session(
         holding_phrase=config.agent.holding_phrase,
         on_event=on_event,
         stop_event=stop_event,
+        place_call=place_call,
     )
 
 

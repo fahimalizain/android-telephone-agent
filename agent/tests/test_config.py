@@ -12,6 +12,7 @@ from telephone_agent.config import (
     Config,
     ConfigError,
     DialerConfig,
+    InboundConfig,
     RealtimeConfig,
     ServerConfig,
     TranscriptConfig,
@@ -63,6 +64,9 @@ def test_load_applies_defaults(tmp_path: Path) -> None:
     assert config.server.token == ""
     assert config.server.public_url == ""
     assert config.server.audit_log == ""
+    assert config.inbound == InboundConfig()
+    assert config.inbound.poll_interval_s == 1.0
+    assert config.inbound.answer_delay_s == 0.0
     assert config.transcript == TranscriptConfig()
     assert config.transcript.enabled is False
     assert config.transcript.directory == "runtime/transcripts"
@@ -821,6 +825,53 @@ def test_environment_can_select_json_action_mode(tmp_path: Path) -> None:
 
     assert config.brain.kind == "http"
     assert config.brain.action_mode == "json"
+
+
+def test_load_reads_inbound_section(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        BASE_CONFIG
+        + """
+[inbound]
+poll_interval_s = 0.5
+answer_delay_s = 2.5
+""",
+    )
+
+    config = load(path, env={})
+
+    assert config.inbound.poll_interval_s == 0.5
+    assert config.inbound.answer_delay_s == 2.5
+
+
+def test_environment_overrides_inbound(tmp_path: Path) -> None:
+    env = {
+        "TELEPHONE_AGENT_INBOUND__POLL_INTERVAL_S": "0.25",
+        "TELEPHONE_AGENT_INBOUND__ANSWER_DELAY_S": "3",
+    }
+
+    config = load(_write(tmp_path), env=env)
+
+    assert config.inbound.poll_interval_s == 0.25
+    assert config.inbound.answer_delay_s == 3.0
+
+
+@pytest.mark.parametrize(
+    "inbound_block, message",
+    [
+        ("[inbound]\npoll_interval_s = 0.1", "inbound.poll_interval_s"),
+        ("[inbound]\npoll_interval_s = 31", "inbound.poll_interval_s"),
+        ("[inbound]\npoll_interval_s = nan", "inbound.poll_interval_s"),
+        ("[inbound]\nanswer_delay_s = -1", "inbound.answer_delay_s"),
+        ("[inbound]\nanswer_delay_s = 31", "inbound.answer_delay_s"),
+        ("[inbound]\nanswer_delay_s = nan", "inbound.answer_delay_s"),
+    ],
+)
+def test_inbound_validation(tmp_path: Path, inbound_block: str, message: str) -> None:
+    path = _write(tmp_path, f"{BASE_CONFIG}\n{inbound_block}\n")
+
+    with pytest.raises(ConfigError, match=message):
+        load(path, env={})
 
 
 def test_example_config_is_complete_and_valid() -> None:

@@ -32,6 +32,7 @@ __all__ = [
     "Config",
     "ConfigError",
     "DialerConfig",
+    "InboundConfig",
     "RealtimeConfig",
     "ServerConfig",
     "TranscriptConfig",
@@ -87,6 +88,21 @@ class DialerConfig:
     token: str = field(default="", repr=False)
     timeout_s: float = 10.0
     retries: int = 2
+
+
+@dataclass(frozen=True, slots=True)
+class InboundConfig:
+    """Settings for the inbound call watcher.
+
+    The watcher polls the helper's ``/state`` endpoint and answers every
+    ringing call on the agent's SIM. ``answer_delay_s`` is a short grace period
+    before the answer request, for example to let a paired Bluetooth link settle
+    or to give the operator time to answer manually. Caller ID is unavailable:
+    the helper does not request ``READ_CALL_LOG`` and never exposes a number.
+    """
+
+    poll_interval_s: float = 1.0
+    answer_delay_s: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +232,7 @@ class Config:
     realtime: RealtimeConfig = field(default_factory=RealtimeConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    inbound: InboundConfig = field(default_factory=InboundConfig)
     phone_number: str = field(default="", repr=False)
     transcript: TranscriptConfig = field(default_factory=TranscriptConfig)
 
@@ -270,6 +287,7 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
         "realtime",
         "agent",
         "server",
+        "inbound",
         "transcript",
     }
     unknown = sorted(set(data) - allowed)
@@ -277,7 +295,7 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
         raise ConfigError(
             "unknown top-level configuration key(s): "
             f"{', '.join(unknown)}; expected phone_number, audio, dialer, brain, "
-            "realtime, agent, server, transcript"
+            "realtime, agent, server, inbound, transcript"
         )
 
     config = Config(
@@ -288,6 +306,7 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
         realtime=_build_section(RealtimeConfig, data.get("realtime"), "realtime"),
         agent=_build_section(AgentConfig, data.get("agent"), "agent"),
         server=_build_section(ServerConfig, data.get("server"), "server"),
+        inbound=_build_section(InboundConfig, data.get("inbound"), "inbound"),
         transcript=_build_section(TranscriptConfig, data.get("transcript"), "transcript"),
     )
     config = _apply_env(config, os.environ if env is None else env)
@@ -308,6 +327,7 @@ def validate(config: Config) -> None:
     _validate_realtime(config.realtime, config.audio)
     _validate_agent(config.agent)
     _validate_server(config.server)
+    _validate_inbound(config.inbound)
     _validate_transcript(config.transcript)
     if config.phone_number:
         ensure_e164(config.phone_number)
@@ -544,6 +564,19 @@ def _validate_server(server: ServerConfig) -> None:
         )
 
 
+def _validate_inbound(inbound: InboundConfig) -> None:
+    if not math.isfinite(inbound.poll_interval_s) or not 0.2 <= inbound.poll_interval_s <= 30.0:
+        raise ConfigError(
+            "inbound.poll_interval_s must be between 0.2 and 30 seconds "
+            f"(got {inbound.poll_interval_s}); poll once per second for normal use"
+        )
+    if not math.isfinite(inbound.answer_delay_s) or not 0.0 <= inbound.answer_delay_s <= 30.0:
+        raise ConfigError(
+            "inbound.answer_delay_s must be between 0 and 30 seconds "
+            f"(got {inbound.answer_delay_s})"
+        )
+
+
 def _validate_transcript(transcript: TranscriptConfig) -> None:
     if not isinstance(transcript.enabled, bool):
         raise ConfigError(f"transcript.enabled must be a boolean (got {transcript.enabled!r})")
@@ -626,6 +659,7 @@ def _apply_env(config: Config, env: Mapping[str, str]) -> Config:
         "realtime": RealtimeConfig,
         "agent": AgentConfig,
         "server": ServerConfig,
+        "inbound": InboundConfig,
         "transcript": TranscriptConfig,
     }
 

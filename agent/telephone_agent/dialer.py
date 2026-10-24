@@ -4,7 +4,10 @@ The helper is expected to expose this small JSON contract on the LAN:
 
 ======================  =====================================================
 ``GET /health``         Liveness check; returns a JSON object.
+``GET /state``          Call phase: ``idle``, ``ringing``, ``offhook``, or
+                        ``unknown``.
 ``POST /call``          Body ``{"number": "+E164"}``; places the call.
+``POST /answer``        Body ``{}``; answers the currently ringing call.
 ``POST /hangup``        Body ``{}``; ends the current call when supported.
 ======================  =====================================================
 
@@ -14,8 +17,10 @@ connection does not place a second call if the helper honours it. 4xx responses
 are never retried. 5xx and connection errors are retried with bounded
 exponential backoff.
 
-Phone numbers are masked in logs. Error bodies returned by the helper are
-sanitised for the number that was dialled before they are stored or logged.
+The helper never returns a caller's phone number, so ``/state`` and ``/answer``
+contain no caller ID. Phone numbers are masked in logs. Error bodies returned by
+the helper are sanitised for the number that was dialled before they are stored
+or logged.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ logger = logging.getLogger(__name__)
 _USER_AGENT = "telephone-agent/0.1"
 _MAX_BACKOFF_S = 5.0
 _MAX_ERROR_DETAIL = 300
+_ALLOWED_STATES = frozenset({"idle", "ringing", "offhook", "unknown"})
 
 
 class DialerError(RuntimeError):
@@ -114,6 +120,42 @@ class Dialer:
             sensitive=number,
             idempotency_key=uuid.uuid4().hex,
         )
+
+    def state(self) -> dict[str, object]:
+        """Return the helper's current call phase.
+
+        The payload contains a ``state`` key whose value is one of ``idle``,
+        ``ringing``, ``offhook``, or ``unknown``. A malformed payload raises
+        :class:`DialerError` rather than returning an object the watcher cannot
+        interpret. The helper never exposes the caller's number.
+
+        Raises:
+            DialerError: If the helper is unreachable, returns a non-2xx
+                response, or returns an invalid state payload.
+        """
+
+        payload = self._request("GET", "/state")
+        value = payload.get("state")
+        if not isinstance(value, str) or value not in _ALLOWED_STATES:
+            raise DialerError(
+                "dial helper returned an invalid call state; expected one of "
+                f"{', '.join(sorted(_ALLOWED_STATES))} (got {value!r})",
+                status=200,
+                body=str(value),
+            )
+        return payload
+
+    def answer(self) -> dict[str, object]:
+        """Ask the helper to answer the currently ringing call.
+
+        A successful response means Telecom accepted the answer request, not
+        that the call is already connected. The helper returns HTTP 409 when no
+        call is ringing, 403 when answer permission is denied, and 500 when the
+        platform answer attempt fails. Those are 4xx/5xx responses and follow
+        the normal retry policy; 4xx is never retried.
+        """
+
+        return self._request("POST", "/answer", payload={})
 
     def hangup(self) -> dict[str, object]:
         """Ask the helper to end the current call.
