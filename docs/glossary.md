@@ -81,6 +81,10 @@ the hardware accepts. It is used for the fixed-format gadget.
 **PSTN.** Public switched telephone network, the circuit-switched telephone system that
 connects the cellular call to the callee.
 
+**Realtime speech-to-speech.** A single full-duplex model session that recognizes speech,
+decides the reply, and synthesizes audio, instead of separate STT, LLM, and TTS stages.
+The Grok Voice adapter is the optional implementation in this runtime.
+
 **SCO.** Synchronous Connection Oriented, a Bluetooth link used for call audio. It carries
 narrowband CVSD or wideband mSBC; eSCO is its enhanced, retransmitting variant.
 

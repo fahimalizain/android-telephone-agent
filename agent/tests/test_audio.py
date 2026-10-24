@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 
 import pytest
 from telephone_agent.audio import (
@@ -337,3 +338,48 @@ def test_play_reports_player_stderr_and_status() -> None:
         audio.play(b"\x00\x00" * audio.frame_bytes)
 
     assert "status 2" in str(excinfo.value)
+
+
+def test_streaming_playback_writes_chunks_and_closes() -> None:
+    audio = GadgetAudio("UAC1Gadget")
+    audio._playback_command = lambda: [  # type: ignore[method-assign]
+        sys.executable,
+        "-c",
+        ("import sys; data = sys.stdin.buffer.read(); sys.exit(0 if len(data) == 1280 else 3)"),
+    ]
+
+    with audio.start_playback() as stream:
+        stream.write(b"\x00\x00" * 320)
+        stream.write(b"\x00\x00" * 320)
+
+
+def test_streaming_playback_stop_terminates_the_player() -> None:
+    audio = GadgetAudio("UAC1Gadget")
+    audio._playback_command = lambda: [  # type: ignore[method-assign]
+        sys.executable,
+        "-c",
+        "import time; time.sleep(30)",
+    ]
+    stream = audio.start_playback()
+    stream.write(b"\x00\x00" * 320)
+
+    started = time.monotonic()
+    stream.stop()
+    elapsed = time.monotonic() - started
+    stream.close()
+
+    assert elapsed < 5.0
+
+
+def test_streaming_playback_can_restart_after_stop() -> None:
+    audio = GadgetAudio("UAC1Gadget")
+    audio._playback_command = lambda: [  # type: ignore[method-assign]
+        sys.executable,
+        "-c",
+        "import sys; sys.stdin.buffer.read(); sys.exit(0)",
+    ]
+    stream = audio.start_playback()
+    stream.write(b"\x00\x00" * 320)
+    stream.stop()
+    stream.write(b"\x00\x00" * 320)
+    stream.close()

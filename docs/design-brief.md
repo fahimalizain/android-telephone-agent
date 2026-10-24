@@ -26,9 +26,10 @@ plane is asynchronous; the voice conversation remains real-time. This does not a
 inbound PSTN calling.
 
 The reference runtime implements the control plane and both listeners. It does not yet
-enforce a destination allowlist, per-requester budgets, or requester identity, and it
-does not bundle STT or TTS adapters. See [Interoperability](./interop.md) for what ships
-in the alpha and what remains follow-up work.
+enforce a destination allowlist, per-requester budgets, or requester identity, and the
+default text pipeline does not bundle STT or TTS adapters. An independent Grok Voice
+realtime adapter is available instead. See [Interoperability](./interop.md) for what
+ships in the alpha and what remains follow-up work.
 
 ## 2. What this is not
 
@@ -83,7 +84,8 @@ receives the downlink. Owning the headset means owning both directions.
   Raspberry Pi Zero 2 W
   (audio bridge + agent runtime)
      │
-     └── Wi-Fi ──► LAN ──► STT / LLM / TTS providers (India region preferred)
+     └── Wi-Fi ──► LAN ──► STT / LLM / TTS (India preferred)
+                           or Grok Voice realtime
 
   Power: 25 W charger ──► USB-C hub (PD passthrough) ──► Phone A
                                       └── USB-A ──► Pi Zero 2 W
@@ -214,9 +216,11 @@ link is 16 kHz with mSBC or 8 kHz with CVSD, and the boundary resamples to the s
 16 kHz mono processing format.
 
 The reference runtime implements the control plane, the deliberative action loop, and
-mid-call consultation. It does not bundle STT/TTS adapters, streaming, barge-in, or a
-scheduler; `run` and `serve` use scaffold-mode speech until adapters are wired. The
-requirements below remain the target for the voice path.
+mid-call consultation. The default text path does not bundle STT/TTS adapters,
+streaming, or barge-in; `run` and `serve` use scaffold-mode speech until adapters are
+wired. An independent Grok Voice realtime adapter is available for full-duplex
+speech-to-speech (`realtime.kind = "grok"`). The requirements below remain the target
+for the voice path.
 
 Requirements:
 
@@ -247,6 +251,10 @@ Provider guidance:
   (Malayalam and English, Indian English), Azure Speech (Central/South India), or
   Google Cloud (Mumbai) are candidates. US-only endpoints add ~200–250 ms RTT.
 - LLM: any low-latency streaming provider. Tool calls are optional for v0.
+- Realtime speech-to-speech: the optional Grok Voice adapter
+  (`realtime.kind = "grok"`) collapses STT, LLM, and TTS into one WebSocket. xAI
+  does not document Malayalam for this endpoint as of 2026-10; test code-mixed
+  speech before choosing it over an India-region STT/TTS pair.
 - Local fallback: Whisper.cpp + Piper can run on a Pi 4/5, not comfortably on a
   Zero 2 W. Treat local models as a stretch goal.
 

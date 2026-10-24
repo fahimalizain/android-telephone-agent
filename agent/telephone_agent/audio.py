@@ -18,7 +18,9 @@ subprocesses. The USB gadget runs at 48 kHz stereo; the default processing rate
 is 16 kHz mono, which is enough for the cellular codec and cheaper on a small
 host. ``plughw`` and PipeWire perform the format conversion, so the values in
 :class:`~telephone_agent.config.AudioConfig` are the processing format rather
-than the wire format.
+than the wire format. ``play()`` is the one-shot path for the text pipeline;
+``start_playback()`` returns a reusable stream for the realtime adapter and can
+be interrupted for barge-in.
 
 No audio is written to disk. Capture diagnostics are kept in an anonymous
 temporary file only so that a failed start can be reported.
@@ -34,6 +36,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -48,6 +51,7 @@ __all__ = [
     "CaptureDevice",
     "GadgetAudio",
     "PipeWireAudio",
+    "PlaybackStream",
 ]
 
 logger = logging.getLogger(__name__)
@@ -59,6 +63,7 @@ _CARD_LINE = re.compile(
 )
 _BLUETOOTH_ADDRESS = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 _STOP_TIMEOUT_S = 2.0
+_PLAYBACK_DRAIN_TIMEOUT_S = 10.0
 _PW_DUMP_TIMEOUT_S = 10.0
 # Stop pw-cat from silently falling back to the default source/sink if the SCO
 # node disappears (call ended) or is not created. Without these properties,
@@ -106,7 +111,12 @@ class AudioStats:
 
 
 class AudioDevice(Protocol):
-    """Structural interface used by :class:`~telephone_agent.pipeline.CallSession`."""
+    """Structural interface used by the call sessions.
+
+    ``frames()`` and :meth:`play` are enough for the utterance-at-a-time
+    pipeline. A full-duplex session uses :meth:`start_playback` so it can write
+    audio chunks as they arrive and stop them on barge-in.
+    """
 
     sample_rate: int
     channels: int
@@ -129,17 +139,45 @@ class AudioDevice(Protocol):
     def play(self, pcm: bytes) -> None:
         """Play 16-bit PCM into the call uplink."""
 
+    def start_playback(self) -> PlaybackStream:
+        """Open a streaming sink for 16-bit PCM playback."""
+
     def selftest(self, duration_s: float = 2.0) -> AudioStats:
         """Record for approximately *duration_s* and report signal statistics."""
+
+
+class PlaybackStream(Protocol):
+    """A write-ahead playback sink with an interrupt path.
+
+    ``write`` may block while the player consumes the pipe. ``stop`` must be
+    safe to call from another thread; it terminates the current player so a
+    blocked ``write`` returns. After ``stop``, a later ``write`` starts a fresh
+    player, which is what barge-in needs. ``close`` drains and releases the sink.
+    """
+
+    def write(self, pcm: bytes) -> None:
+        """Write one chunk of 16-bit PCM."""
+
+    def stop(self) -> None:
+        """Stop the current player immediately; the sink stays reusable."""
+
+    def close(self) -> None:
+        """Close the sink, allowing queued audio to drain."""
+
+    def __enter__(self) -> PlaybackStream:
+        """Return this stream."""
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        """Close the stream."""
 
 
 class _ProcessAudio:
     """Shared subprocess lifecycle for the ALSA and PipeWire backends.
 
     Subclasses provide the capture/playback commands and the user-facing names
-    used in error messages. The capture process is single-instance; playback is
-    one process per utterance, which keeps lifecycle handling simple and costs a
-    short process start per reply.
+    used in error messages. The capture process is single-instance. ``play``
+    starts one player process per utterance; ``start_playback`` keeps one player
+    open for streaming and can stop it on barge-in.
     """
 
     _capture_tool = "capture tool"
@@ -261,8 +299,8 @@ class _ProcessAudio:
     def play(self, pcm: bytes) -> None:
         """Play raw 16-bit PCM through the call uplink path.
 
-        Playback blocks until the player exits. There is no barge-in in v0; see
-        :mod:`telephone_agent.pipeline`.
+        Playback blocks until the player exits. A full-duplex caller should use
+        :meth:`start_playback` instead.
         """
 
         if not pcm:
@@ -314,6 +352,11 @@ class _ProcessAudio:
             if detail:
                 message = f"{message}: {detail}"
             raise AudioError(message)
+
+    def start_playback(self) -> PlaybackStream:
+        """Return a streaming playback sink for this device."""
+
+        return _SubprocessPlayback(self)
 
     def selftest(self, duration_s: float = 2.0) -> AudioStats:
         """Record for approximately *duration_s* and report signal statistics.
@@ -406,13 +449,146 @@ class _ProcessAudio:
                 handle.close()
 
 
+class _SubprocessPlayback:
+    """Streaming playback for one ``_ProcessAudio`` backend.
+
+    A player process is started lazily on the first ``write``. ``stop`` kills
+    that process so a blocked write returns immediately; a later write starts a
+    fresh player. ``stderr`` is discarded because the streaming path is
+    long-lived and reading it concurrently with writes would need another
+    thread; the exit status is logged instead.
+    """
+
+    def __init__(self, audio: _ProcessAudio) -> None:
+        self._audio = audio
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen[bytes] | None = None
+        self._closed = False
+
+    def write(self, pcm: bytes) -> None:
+        if not pcm:
+            return
+        frame_size = self._audio.channels * 2
+        if len(pcm) % frame_size:
+            raise AudioError(f"PCM length {len(pcm)} is not a multiple of {frame_size} bytes")
+
+        process = self._ensure_process()
+        stdin = process.stdin
+        if stdin is None:  # pragma: no cover - Popen was called with a pipe
+            raise AudioError("playback process did not provide a stdin pipe")
+        try:
+            stdin.write(pcm)
+            stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            with self._lock:
+                if self._process is process:
+                    self._process = None
+            raise AudioError(
+                f"cannot write PCM to {self._audio._playback_tool}; the player exited"
+            ) from exc
+
+    def stop(self) -> None:
+        with self._lock:
+            process = self._process
+            self._process = None
+        self._terminate(process)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            process = self._process
+            self._process = None
+
+        if process is None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=_PLAYBACK_DRAIN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            self._terminate(process)
+            return
+        if process.returncode not in (0, None):
+            logger.warning(
+                "%s exited with status %s during streaming playback",
+                self._audio._playback_tool,
+                process.returncode,
+            )
+
+    def __enter__(self) -> _SubprocessPlayback:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def _ensure_process(self) -> subprocess.Popen[bytes]:
+        with self._lock:
+            if self._closed:
+                raise AudioError("playback stream is closed")
+            process = self._process
+            if process is not None:
+                if process.poll() is None:
+                    return process
+                self._process = None
+                raise AudioError(
+                    f"{self._audio._playback_tool} exited with status {process.returncode}"
+                )
+
+            command = self._audio._playback_command()
+            logger.debug("starting streaming playback: %s", " ".join(command))
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=0,
+                    text=False,
+                )
+            except FileNotFoundError as exc:
+                raise AudioError(
+                    f"{self._audio._playback_tool} was not found; {self._audio._tool_hint}"
+                ) from exc
+            except OSError as exc:
+                raise AudioError(f"cannot start {self._audio._playback_tool}: {exc}") from exc
+            self._process = process
+            return process
+
+    def _terminate(self, process: subprocess.Popen[bytes] | None) -> None:
+        if process is None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+        except OSError:
+            pass
+        if process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
+            try:
+                process.wait(timeout=_STOP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                try:
+                    process.wait(timeout=_STOP_TIMEOUT_S)
+                except subprocess.TimeoutExpired:
+                    logger.warning("%s did not exit after SIGKILL", self._audio._playback_tool)
+
+
 class GadgetAudio(_ProcessAudio):
     """Capture and playback through the USB gadget's ALSA card.
 
     A single capture process is used. ``frames()`` starts it on demand and stops
     it when the generator is closed. Playback is one ``aplay`` process per
-    utterance. Do not call :meth:`start` or :meth:`stop` from another thread
-    while ``frames()`` is running.
+    utterance for ``play()``, or a reusable streaming process for
+    ``start_playback()``. Do not call :meth:`start` or :meth:`stop` from another
+    thread while ``frames()`` is running.
     """
 
     _capture_tool = "arecord"

@@ -12,6 +12,7 @@ from telephone_agent.config import (
     Config,
     ConfigError,
     DialerConfig,
+    RealtimeConfig,
     ServerConfig,
     ensure_e164,
     load,
@@ -52,6 +53,8 @@ def test_load_applies_defaults(tmp_path: Path) -> None:
     assert config.agent.vad_threshold == -40.0
     assert config.agent.consult_timeout_s == 8.0
     assert config.agent.holding_phrase == "One moment please."
+    assert config.realtime == RealtimeConfig()
+    assert config.realtime.kind == "off"
     assert config.server == ServerConfig()
     assert config.server.host == "127.0.0.1"
     assert config.server.port == 8765
@@ -175,6 +178,121 @@ def test_environment_overrides_server(tmp_path: Path) -> None:
     assert config.server.token == "env-server-token"
     assert config.server.public_url == "https://agent.example.invalid"
     assert config.server.audit_log == "/tmp/audit.jsonl"
+
+
+def test_load_reads_realtime_section(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        BASE_CONFIG
+        + """
+[realtime]
+kind = "grok"
+base_url = "wss://api.x.ai/v1/realtime"
+model = "grok-voice-3.0"
+voice = "ara"
+instructions = "Be brief."
+language = "en-IN"
+reasoning_effort = "high"
+vad_threshold = 0.6
+prefix_padding_ms = 250
+silence_duration_ms = 400
+idle_timeout_ms = 15000
+""",
+    )
+
+    config = load(path, env={})
+
+    assert config.realtime.kind == "grok"
+    assert config.realtime.model == "grok-voice-3.0"
+    assert config.realtime.voice == "ara"
+    assert config.realtime.instructions == "Be brief."
+    assert config.realtime.language == "en-IN"
+    assert config.realtime.reasoning_effort == "high"
+    assert config.realtime.vad_threshold == 0.6
+    assert config.realtime.idle_timeout_ms == 15000
+
+
+def test_environment_overrides_realtime(tmp_path: Path) -> None:
+    env = {
+        "TELEPHONE_AGENT_REALTIME__KIND": "grok",
+        "TELEPHONE_AGENT_REALTIME__MODEL": "grok-voice-latest",
+        "TELEPHONE_AGENT_REALTIME__VOICE": "eve",
+        "TELEPHONE_AGENT_REALTIME__API_KEY": "env-key",
+    }
+
+    config = load(_write(tmp_path), env=env)
+
+    assert config.realtime.kind == "grok"
+    assert config.realtime.api_key == "env-key"
+    assert "env-key" not in repr(config)
+
+
+@pytest.mark.parametrize(
+    "realtime_block, message",
+    [
+        ('[realtime]\nkind = "openai"', "realtime.kind"),
+        ('[realtime]\nkind = "grok"\nbase_url = "https://api.x.ai/v1/realtime"', "ws://"),
+        ('[realtime]\nkind = "grok"\nmodel = "  "', "realtime.model"),
+        ('[realtime]\nkind = "grok"\nvoice = ""', "realtime.voice"),
+        ('[realtime]\nkind = "grok"\nreasoning_effort = "medium"', "reasoning_effort"),
+        ('[realtime]\nkind = "grok"\nvad_threshold = 1.5', "vad_threshold"),
+        ('[realtime]\nkind = "grok"\nprefix_padding_ms = -1', "prefix_padding_ms"),
+        ('[realtime]\nkind = "grok"\nsilence_duration_ms = -1', "silence_duration_ms"),
+        ('[realtime]\nkind = "grok"\nidle_timeout_ms = -1', "idle_timeout_ms"),
+    ],
+)
+def test_realtime_validation(
+    tmp_path: Path,
+    realtime_block: str,
+    message: str,
+) -> None:
+    path = _write(tmp_path, f"{BASE_CONFIG}\n{realtime_block}\n")
+
+    with pytest.raises(ConfigError, match=message):
+        load(path, env={})
+
+
+def test_realtime_rejects_an_unsupported_audio_rate(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+[audio]
+card = "Gadget"
+sample_rate = 12000
+
+[dialer]
+url = "http://127.0.0.1:8080"
+token = "test-token"
+
+[realtime]
+kind = "grok"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="sample_rate"):
+        load(path, env={})
+
+
+def test_realtime_off_allows_pipeline_configuration(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        BASE_CONFIG
+        + """
+[realtime]
+kind = "off"
+model = ""
+
+[brain]
+kind = "http"
+base_url = "https://api.example.invalid/v1"
+model = "test-model"
+""",
+    )
+
+    config = load(path, env={})
+
+    assert config.realtime.kind == "off"
+    assert config.brain.kind == "http"
 
 
 def test_load_reads_server_section(tmp_path: Path) -> None:

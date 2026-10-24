@@ -29,10 +29,11 @@ Prerequisites:
   for being finite and positive, not against any policy.
 - **No requester identity or per-token scoping.** The token is admin-level: every
   caller can list, read, answer, and cancel every task.
-- **No STT or TTS adapters are bundled.** Delegated calls use placeholder transcripts
-  and log replies instead of speaking until adapters are wired in
-  `_build_session_factory`. The control plane is usable for call control, not a
-  natural voice conversation out of the box.
+- **The default text pipeline has no STT or TTS adapters.** Delegated calls use
+  placeholder transcripts and log replies until adapters are wired in
+  `_build_session_factory`. Set `realtime.kind = "grok"` to use the independent
+  Grok Voice speech-to-speech adapter instead. The control plane is usable for
+  call control either way.
 - **No push notifications.** A2A `pushNotifications` is off.
 - **Tasks are in memory.** They do not survive a restart. The optional audit log is
   for audit, not recovery.
@@ -677,9 +678,10 @@ cannot be confirmed marks the task `failed` with reason `hangup_failed`.
 - **No push notifications.** Clients poll or keep a stream open.
 - **Single node.** No durable task store, no horizontal scaling, and no failover. A
   second runtime would need a second phone and SIM.
-- **Scaffold voice path.** With no STT/TTS adapters, the transcript is a placeholder
-  and replies are logged instead of spoken. The control plane still places, tracks,
-  and cancels the call.
+- **Scaffold voice path by default.** With no STT/TTS adapters, the transcript is
+  a placeholder and replies are logged instead of spoken. Set
+  `realtime.kind = "grok"` for full-duplex speech-to-speech. The control plane
+  still places, tracks, and cancels the call.
 
 ## Verification
 

@@ -51,10 +51,11 @@ the call. See the [design brief](./design-brief.md).
 
 ## Is audio recorded?
 
-No, not by default. Audio is streamed through the pipeline and is not written to disk. Audio is sent to
-the configured STT provider; the resulting text is processed by the LLM and TTS provider, whose retention
-policies apply. A debug capture should be opt-in, consented, short, and deleted afterward. See
-[operations](./operations.md).
+No, not by default. Audio is streamed through the pipeline and is not written to disk. On the default
+text path, audio is sent to the configured STT provider and the resulting text is processed by the LLM
+and TTS provider. With `realtime.kind = "grok"`, call audio is sent to xAI's speech-to-speech API
+instead. Provider retention policies apply either way. A debug capture should be opt-in, consented,
+short, and deleted afterward. See [operations](./operations.md).
 
 ## Is this legal? What about TRAI and TCPA?
 
@@ -66,10 +67,12 @@ confirm your obligations before calling anyone who has not agreed to be called. 
 
 ## What languages does it support?
 
-The reference pipeline is language-agnostic but depends on the providers. Sarvam AI is a candidate for
-Malayalam, English, and Indian English; Azure Speech and Google Cloud are also options for India-region
-service. Code-mixed Malayalam-English quality varies by vendor and needs testing. Prompts and voices are
-configuration, not hard-coded features. See the [design brief](./design-brief.md).
+The reference text pipeline is language-agnostic but depends on the providers. Sarvam AI is a candidate
+for Malayalam, English, and Indian English; Azure Speech and Google Cloud are also options for
+India-region service. Code-mixed Malayalam-English quality varies by vendor and needs testing. The
+optional Grok Voice realtime adapter documents English, Hindi, and Bengali but not Malayalam as of
+2026-10. Prompts and voices are configuration, not hard-coded features. See the
+[design brief](./design-brief.md).
 
 ## What latency should I expect?
 
@@ -82,7 +85,8 @@ than judging by ear. See [latency budget](./latency-budget.md).
 
 The hardware is approximately ₹7,000 in India, excluding the phone, SIM, and charger; verify current
 prices. Ongoing costs are the SIM plan, electricity for the Pi and phone charging, and provider usage
-for STT, LLM, and TTS. Provider pricing changes, so estimate from current rates rather than a fixed
+for STT, LLM, and TTS on the text path. Realtime speech-to-speech is billed per minute of audio and can
+cost several times more. Provider pricing changes, so estimate from current rates rather than a fixed
 figure. See [hardware](./hardware.md) and [BOM](./bom.csv).
 
 ## Can it call multiple people?

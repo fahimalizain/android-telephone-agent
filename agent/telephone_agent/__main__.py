@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import logging
 import shutil
 import sys
@@ -25,6 +26,11 @@ from .brain import BrainError, build_brain, build_deliberative_brain
 from .config import Config, ConfigError, DialerConfig, ensure_e164, load
 from .consult import ConsultationBroker
 from .dialer import Dialer, DialerError, mask_number
+from .grok_realtime import (
+    GrokRealtimeError,
+    GrokRealtimeSession,
+    resolve_api_key,
+)
 from .pipeline import CallEndReason, CallSession, CallState, SessionEvent
 from .service import CallService, CallTask, SessionFactory
 
@@ -100,8 +106,9 @@ def build_parser() -> argparse.ArgumentParser:
         "run",
         help="place a call and run the conversation loop until hangup",
         description=(
-            "Place one call and run the v0 conversation loop. STT and TTS "
-            "adapters are not bundled; see agent/README.md for the adapter seams."
+            "Place one call and run the conversation loop. The default path uses "
+            "the text pipeline; set realtime.kind = 'grok' for the full-duplex "
+            "Grok Voice speech-to-speech adapter."
         ),
     )
     run.add_argument(
@@ -163,7 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 1
-    except (AudioError, BrainError, DialerError) as exc:
+    except (AudioError, BrainError, DialerError, GrokRealtimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except Exception:
@@ -222,6 +229,30 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print("phone: not set (pass --number to dial/run)")
     print(f"dialer: {config.dialer.url} (bearer token configured)")
+    if config.realtime.kind == "grok":
+        print("realtime: grok (speech-to-speech; brain and STT/TTS adapters are unused)")
+        print(f"  model: {config.realtime.model}")
+        print(f"  voice: {config.realtime.voice}")
+        print(f"  url: {config.realtime.base_url}")
+        if resolve_api_key(config.realtime):
+            print("  api key: configured")
+        else:
+            print(
+                "  api key: FAIL: set XAI_API_KEY or TELEPHONE_AGENT_REALTIME__API_KEY",
+                file=sys.stderr,
+            )
+            failed = True
+        if importlib.util.find_spec("websockets") is None:
+            print(
+                "  dependency: FAIL: websockets is not installed; run "
+                "`pip install -e '.[realtime]'` in the agent directory",
+                file=sys.stderr,
+            )
+            failed = True
+        else:
+            print("  dependency: ok (websockets)")
+    else:
+        print("realtime: off")
     print(f"brain: {config.brain.kind}")
     if config.brain.kind == "http":
         print(f"  base_url: {config.brain.base_url}")
@@ -395,9 +426,26 @@ def _build_session_factory(config: Config) -> SessionFactory:
         broker: ConsultationBroker,
         stop_event: threading.Event,
         on_event: Callable[[SessionEvent], None],
-    ) -> CallSession:
+    ) -> CallSession | GrokRealtimeSession:
         audio = _audio_from_config(config)
         dialer = _dialer_from_config(config.dialer)
+        limit = (
+            task.max_call_seconds
+            if task.max_call_seconds is not None
+            else config.agent.max_call_seconds
+        )
+        if config.realtime.kind == "grok":
+            return _build_realtime_session(
+                config,
+                audio,
+                dialer,
+                task.number,
+                objective=task.objective,
+                broker=broker,
+                stop_event=stop_event,
+                on_event=on_event,
+                max_call_seconds=limit,
+            )
         brain = build_deliberative_brain(config.brain)
         return CallSession(
             audio=audio,
@@ -405,11 +453,7 @@ def _build_session_factory(config: Config) -> SessionFactory:
             deliberative=brain,
             consultations=broker,
             number=task.number,
-            max_call_seconds=(
-                task.max_call_seconds
-                if task.max_call_seconds is not None
-                else config.agent.max_call_seconds
-            ),
+            max_call_seconds=limit,
             silence_timeout_s=config.agent.silence_timeout_s,
             vad_threshold=config.agent.vad_threshold,
             consult_timeout_s=config.agent.consult_timeout_s,
@@ -484,19 +528,18 @@ async def _serve(service: CallService, apps: Sequence[tuple[object, str, int]]) 
         await service.stop()
 
 
-def _build_session(config: Config, number: str) -> CallSession:
-    """Create a call session.
+def _build_session(config: Config, number: str) -> CallSession | GrokRealtimeSession:
+    """Create the call session selected by the configuration.
 
-    This is the integration point for real speech adapters. v0 does not bundle
-    STT or TTS. Once you have implementations of
-    :class:`telephone_agent.pipeline.Transcriber` and
-    :class:`telephone_agent.pipeline.Synthesizer`, construct them here and pass
-    ``transcriber=`` and ``synthesizer=`` to :class:`CallSession`. See
-    ``agent/README.md`` for the expected PCM format and streaming notes.
+    ``realtime.kind = "grok"`` returns the independent speech-to-speech
+    adapter. The default path keeps the text pipeline and its injected speech
+    adapter seams.
     """
 
     audio = _audio_from_config(config)
     dialer = _dialer_from_config(config.dialer)
+    if config.realtime.kind == "grok":
+        return _build_realtime_session(config, audio, dialer, number)
     brain = build_brain(config.brain)
     return CallSession(
         audio=audio,
@@ -506,8 +549,40 @@ def _build_session(config: Config, number: str) -> CallSession:
         max_call_seconds=config.agent.max_call_seconds,
         silence_timeout_s=config.agent.silence_timeout_s,
         vad_threshold=config.agent.vad_threshold,
-        # transcriber=MyTranscriber(),  # v0: not bundled
-        # synthesizer=MySynthesizer(),  # v0: not bundled
+        # transcriber=MyTranscriber(),  # not bundled; see agent/README.md
+        # synthesizer=MySynthesizer(),  # not bundled; see agent/README.md
+    )
+
+
+def _build_realtime_session(
+    config: Config,
+    audio: AudioDevice,
+    dialer: Dialer,
+    number: str,
+    *,
+    objective: str = "",
+    broker: ConsultationBroker | None = None,
+    stop_event: threading.Event | None = None,
+    on_event: Callable[[SessionEvent], None] | None = None,
+    max_call_seconds: float | None = None,
+) -> GrokRealtimeSession:
+    """Build the Grok Voice adapter without touching the text pipeline."""
+
+    return GrokRealtimeSession(
+        audio=audio,
+        dialer=dialer,
+        number=number,
+        config=config.realtime,
+        objective=objective,
+        consultations=broker,
+        max_call_seconds=(
+            max_call_seconds if max_call_seconds is not None else config.agent.max_call_seconds
+        ),
+        silence_timeout_s=config.agent.silence_timeout_s,
+        consult_timeout_s=config.agent.consult_timeout_s,
+        holding_phrase=config.agent.holding_phrase,
+        on_event=on_event,
+        stop_event=stop_event,
     )
 
 

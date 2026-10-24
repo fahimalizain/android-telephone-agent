@@ -63,7 +63,7 @@ flowchart TB
     PhoneB["Phone B<br/>SIM B, owner"]
     PSTN["PSTN / cellular network"]
     Pi["Raspberry Pi Zero 2 W<br/>audio bridge + agent runtime"]
-    Providers["STT / LLM / TTS providers<br/>India region preferred"]
+    Providers["STT / LLM / TTS<br/>(India region preferred)<br/>or Grok Voice realtime"]
     Charger["25 W USB-C charger"]
     Hub["USB-C hub<br/>PD passthrough"]
 
@@ -100,7 +100,10 @@ helper, LAN, and cloud paths are unchanged.
    mono, runs voice activity detection, and streams audio to a speech-to-text provider.
    The transcript goes to a streaming LLM, and the reply is synthesized sentence by
    sentence and played back into the call. Barge-in stops playback when the callee
-   speaks; endpointing and timeouts keep the conversation from stalling.
+   speaks; endpointing and timeouts keep the conversation from stalling. Alternatively,
+   `realtime.kind = "grok"` uses xAI's Grok Voice speech-to-speech WebSocket in one
+   full-duplex session; that adapter is independent of the STT/LLM/TTS seams. Its
+   documented realtime languages do not include Malayalam yet.
 4. **Hangup.** The agent stops audio, requests call termination through the helper where
    Android permits it, and otherwise relies on the remote party or the hard call-duration
    limit to end the call. The outcome is logged locally and summarized in a heartbeat.
@@ -160,7 +163,7 @@ docs/
   troubleshooting.md
   faq.md
   glossary.md
-  decisions/0001-...md .. 0007-...md
+  decisions/0001-...md .. 0008-...md
 scripts/
   README.md
   uac-gadget.sh
@@ -182,8 +185,20 @@ agent/
   tests/*.py
 android-helper/
   README.md
-  DialService.kt
-  AndroidManifest.xml
+  settings.gradle.kts
+  build.gradle.kts
+  gradle.properties
+  gradlew
+  gradlew.bat
+  gradle/wrapper/*
+  app/
+    build.gradle.kts
+    proguard-rules.pro
+    src/main/AndroidManifest.xml
+    src/main/java/dev/example/dialhelper/
+      DialService.kt
+      MainActivity.kt
+    src/main/res/values/strings.xml
 .github/
   ISSUE_TEMPLATE/*
   PULL_REQUEST_TEMPLATE.md
@@ -197,10 +212,14 @@ The map matches the layout described in section 14 of the design brief.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| v0 | Manual dial, USB gadget enumeration, and loopback audio verification | Planned |
+| v0 | Manual dial, USB gadget enumeration, and loopback audio verification | In progress: helper builds and installs; hardware validation pending |
 | v0.1 | Scheduler, one call per slot, bounded retries, heartbeat and alerting | Planned |
 | v0.2 | Barge-in, endpointing, streaming STT/LLM/TTS, latency measurement against the budget | Planned |
 | v0.3 | Inbound calls | Exploratory |
+
+The Android helper now builds from `android-helper/` with Gradle and produces an
+installable APK. No physical phone, SIM, USB-audio, or end-to-end hardware validation has
+been recorded yet, so v0 remains in progress.
 
 Milestones are sequential. v0.3 depends on open questions about call control and is not
 committed. See [docs/design-brief.md](docs/design-brief.md) section 15.

@@ -228,8 +228,8 @@ flowchart LR
     HUB["USB-C hub, PD input"]
     RTR["Wi-Fi router"]
   end
-  subgraph CLOUD["Cloud, India region"]
-    VOICE["STT / LLM / TTS"]
+  subgraph CLOUD["Cloud providers"]
+    VOICE["STT / LLM / TTS<br/>or Grok Voice realtime"]
   end
   B["Phone B: callee"]
   HUB -->|"PD"| USB
@@ -383,9 +383,12 @@ refuses, is unregistered, or has no credit. The helper should expose a minimal A
 bind only to the private LAN, require a bearer token, and reject destinations outside
 an allowlist. Never port-forward it.
 
-Cloud providers receive call audio and transcripts, a deliberate trade-off in
-[ADR 0004](./decisions/0004-cloud-voice-stack-first.md). The reference pipeline does
-not persist audio; logs should redact full numbers and omit transcripts.
+Cloud providers receive call audio and, on the text path, transcripts; this is a
+deliberate trade-off in [ADR 0004](./decisions/0004-cloud-voice-stack-first.md).
+The optional Grok Voice realtime adapter sends audio to xAI instead and is covered
+by [ADR 0008](./decisions/0008-use-grok-voice-realtime-adapter.md). The reference
+pipeline does not persist audio; logs should redact full numbers and omit
+transcripts.
 
 A power cut is asymmetric: Phone A survives on its battery, but the Pi and router stop
 unless the UPS covers them, so a call in progress fails. See

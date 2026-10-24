@@ -36,7 +36,7 @@ USB or Android specification enforces them.
 | [Bluetooth HFP](bluetooth-hfp.md) | Alternative audio transport: WirePlumber roles, pairing, SCO nodes, audio test, agent configuration, and user-session deployment. |
 | [Android setup](android-setup.md) | Phone A configuration for unattended calls, SIM selection, and USB audio routing. |
 | [Dial helper](dial-helper.md) | Reference helper app, its LAN API, bearer-token authentication, and call-control limits. |
-| [Voice agent](voice-agent.md) | Capture, voice activity detection, STT, LLM, TTS, playback, barge-in, and timeouts. |
+| [Voice agent](voice-agent.md) | Capture, voice activity detection, STT, LLM, TTS, playback, barge-in, and timeouts, plus the realtime speech-to-speech alternative. |
 | [Interoperability](interop.md) | MCP tools and A2A tasks for delegating outbound calls, mid-call consultation, security, and limits. |
 | [Latency budget](latency-budget.md) | Per-stage latency targets, measurement method, and the end-to-end budget. |
 | [Prompts](prompts.md) | Prompt structure, persona, call flow, and conversational guardrails. |
@@ -52,6 +52,7 @@ USB or Android specification enforces them.
 | [ADR-0005: Real SIM origination](decisions/0005-originate-from-real-sim.md) | Originate calls from a real SIM rather than a VoIP service. |
 | [ADR-0006: Bluetooth HFP audio](decisions/0006-use-bluetooth-hfp-audio.md) | Support Bluetooth HFP as an alternative audio transport while keeping USB as the default. |
 | [ADR-0007: MCP and A2A control plane](decisions/0007-expose-agent-over-mcp-and-a2a.md) | Expose the call agent over MCP and A2A through one shared CallService. |
+| [ADR-0008: Grok Voice realtime adapter](decisions/0008-use-grok-voice-realtime-adapter.md) | Add xAI speech-to-speech as an independent full-duplex adapter beside the text pipeline. |
 
 ## Related documents
 

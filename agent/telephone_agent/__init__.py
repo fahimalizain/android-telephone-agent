@@ -2,7 +2,9 @@
 
 The package exposes one small API surface for the call pipeline and the
 supporting configuration, audio, dialing, and brain layers. Runtime code uses
-only the Python standard library; pytest and ruff are development dependencies.
+only the Python standard library, except for the optional ``websockets`` client
+used by the Grok Voice realtime adapter; pytest and ruff are development
+dependencies.
 """
 
 from __future__ import annotations
@@ -23,11 +25,13 @@ from .config import (
     Config,
     ConfigError,
     DialerConfig,
+    RealtimeConfig,
     ensure_e164,
     load,
     validate,
 )
 from .dialer import Dialer, DialerError, mask_number
+from .grok_realtime import GrokRealtimeError, GrokRealtimeSession
 from .pipeline import (
     CallEndReason,
     CallResult,
@@ -63,8 +67,11 @@ __all__ = [
     "EchoBrain",
     "Endpointer",
     "GadgetAudio",
+    "GrokRealtimeError",
+    "GrokRealtimeSession",
     "HttpBrain",
     "PipeWireAudio",
+    "RealtimeConfig",
     "Synthesizer",
     "Transcriber",
     "__version__",

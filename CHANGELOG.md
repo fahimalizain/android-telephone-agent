@@ -45,6 +45,13 @@ The project is at alpha; minor versions may change APIs and file layout.
 - Interoperability guide and ADR 0007 updated to describe the implemented control
   plane, its single shared admin token, and the v1 limits: no destination allowlist,
   budgets, requester identity, rate limits, push notifications, or bundled STT/TTS.
+- Independent Grok Voice realtime adapter (`telephone_agent/grok_realtime.py`) for
+  xAI's full-duplex speech-to-speech WebSocket API, with server VAD, barge-in,
+  PCM binary transport, `end_call`/`consult` tools, and the `run`/`serve` wiring.
+- `[realtime]` configuration, a `realtime` optional dependency extra, streaming
+  playback with an interrupt path in the ALSA and PipeWire audio backends, and
+  `doctor` checks for the realtime key and WebSocket client. The key is read from
+  `XAI_API_KEY`; no credential is stored in the repository.
 
 ## [0.1.0] - 2026-10-24
 

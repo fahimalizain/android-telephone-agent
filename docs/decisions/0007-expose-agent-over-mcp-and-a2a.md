@@ -144,8 +144,9 @@ protocol. Calls remain outbound PSTN calls; only the control surface is new.
 - **A2A timeout updates.** A server-initiated update when a consultation times out, so
   the A2A task does not stay `TASK_STATE_INPUT_REQUIRED` until the next requester
   message.
-- **Speech adapters.** Bundle or document STT and TTS adapters so delegated calls are a
-  natural voice conversation rather than placeholder transcripts and logged replies.
+- **Speech adapters.** The optional Grok Voice realtime adapter now provides a
+  natural voice path; a bundled STT/TTS pair for the text pipeline remains future
+  work.
 - **Push notifications and TLS.** Both remain operator or deployment concerns. The
   runtime serves plain HTTP and relies on a reverse proxy or VPN for transport security.
 

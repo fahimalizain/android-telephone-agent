@@ -36,6 +36,7 @@ from telephone_agent.config import (
     Config,
     ConfigError,
     DialerConfig,
+    RealtimeConfig,
     ServerConfig,
 )
 from telephone_agent.consult import ConsultationBroker
@@ -582,6 +583,134 @@ def test_build_session_factory_uses_the_configured_call_limit(
     )
 
     assert captured["max_call_seconds"] == 120
+
+
+def test_build_session_factory_wires_the_realtime_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(
+        audio=AudioConfig(card="UAC1Gadget"),
+        dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
+        realtime=RealtimeConfig(kind="grok"),
+        agent=AgentConfig(consult_timeout_s=3.5, holding_phrase="Hold on."),
+    )
+    fake_audio = object()
+    fake_dialer = object()
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_realtime_session(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr("telephone_agent.__main__._audio_from_config", lambda _config: fake_audio)
+    monkeypatch.setattr("telephone_agent.__main__._dialer_from_config", lambda _config: fake_dialer)
+    monkeypatch.setattr(
+        "telephone_agent.__main__.GrokRealtimeSession",
+        fake_realtime_session,
+    )
+
+    def on_event(_event: object) -> None:
+        """Ignore session events."""
+
+    broker = ConsultationBroker()
+    stop_event = threading.Event()
+    task = SimpleNamespace(
+        number="+15555550100",
+        max_call_seconds=42.0,
+        objective="Confirm the 4 pm call.",
+    )
+
+    session = _build_session_factory(config)(
+        task=task,
+        broker=broker,
+        stop_event=stop_event,
+        on_event=on_event,
+    )
+
+    assert session is sentinel
+    assert captured["audio"] is fake_audio
+    assert captured["dialer"] is fake_dialer
+    assert captured["config"] is config.realtime
+    assert captured["objective"] == "Confirm the 4 pm call."
+    assert captured["consultations"] is broker
+    assert captured["number"] == "+15555550100"
+    assert captured["max_call_seconds"] == 42.0
+    assert captured["silence_timeout_s"] == config.agent.silence_timeout_s
+    assert captured["consult_timeout_s"] == 3.5
+    assert captured["holding_phrase"] == "Hold on."
+    assert captured["on_event"] is on_event
+    assert captured["stop_event"] is stop_event
+
+
+def test_doctor_realtime_reports_missing_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_config(
+        tmp_path,
+        """
+[audio]
+card = "UAC1Gadget"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+
+[realtime]
+kind = "grok"
+""",
+    )
+    monkeypatch.setattr("telephone_agent.__main__._check_alsa_capture", lambda _card: True)
+    monkeypatch.setattr(
+        "telephone_agent.__main__._dialer_from_config",
+        lambda _config: FakeDialer(),
+    )
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.delenv("TELEPHONE_AGENT_REALTIME__API_KEY", raising=False)
+
+    assert _cmd_doctor(argparse.Namespace(config=str(path))) == 1
+
+    captured = capsys.readouterr()
+    assert "realtime: grok" in captured.out
+    assert "api key: FAIL" in captured.err
+    assert "doctor: FAIL" in captured.out
+
+
+def test_doctor_realtime_reports_configured_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_config(
+        tmp_path,
+        """
+[audio]
+card = "UAC1Gadget"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+
+[realtime]
+kind = "grok"
+""",
+    )
+    monkeypatch.setattr("telephone_agent.__main__._check_alsa_capture", lambda _card: True)
+    monkeypatch.setattr(
+        "telephone_agent.__main__._dialer_from_config",
+        lambda _config: FakeDialer(),
+    )
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+
+    assert _cmd_doctor(argparse.Namespace(config=str(path))) == 0
+
+    captured = capsys.readouterr()
+    assert "realtime: grok" in captured.out
+    assert "api key: configured" in captured.out
+    assert "test-key" not in captured.out
+    assert "doctor: ok" in captured.out
 
 
 def test_serve_stops_every_listener_when_the_first_exits(

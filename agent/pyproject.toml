@@ -27,7 +27,8 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "websockets>=14,<16"]
+realtime = ["websockets>=14,<16"]
 server = [
   "mcp>=2.3,<3",
   "a2a-sdk>=1.2,<2",

@@ -246,6 +246,21 @@ minimum commits, and telephony; confirm on the provider's pricing page. "Verify"
 means the feature may exist but the language/model/region was not confirmed. An
 India endpoint avoids the 200–250 ms RTT of a US-only endpoint.
 
+## Realtime speech-to-speech
+
+The runtime also ships an independent adapter for xAI's Grok Voice realtime API
+(`realtime.kind = "grok"`). It is a single full-duplex WebSocket that performs
+speech recognition, turn detection, the conversation model, and speech synthesis,
+so it does not use the STT, brain, and TTS seams described above. Call audio is
+sent as binary PCM16 at 16 kHz; server VAD handles endpointing and barge-in, and
+the adapter stops local playback on speech onset. Two function tools are
+available: `end_call` and, for delegated calls, `consult`.
+
+xAI's documented realtime languages include English, Hindi, and Bengali but not
+Malayalam as of 2026-10. Test Malayalam-English code-mixing before relying on
+this path, and prefer the provider evaluated in the rest of this document when
+Malayalam quality is the priority.
+
 ## Local fallback
 
 Whisper.cpp plus Piper keeps audio on the LAN and removes provider outages, but
@@ -278,8 +293,8 @@ turns with a small context.
 | **Approx. total** | | **₹4–7** | **about $0.08–0.10** | **about $0.08–0.13** |
 
 At an assumed ₹90 per US dollar, the cloud examples are roughly ₹7–12 per call.
-Realtime speech-to-speech can cost several times more because audio tokens are
-priced separately. These figures exclude the SIM plan, power, and hardware
+Realtime speech-to-speech can cost several times more because realtime audio is
+metered separately. These figures exclude the SIM plan, power, and hardware
 amortization; recalculate with current rates and actual usage.
 
 ## Privacy

@@ -8,6 +8,11 @@ and describe what to do when the measured system misses the target. Pipeline:
 [voice agent](./voice-agent.md); context: [architecture](./architecture.md),
 [Raspberry Pi setup](./raspberry-pi-setup.md), [agent/README](../agent/README.md); prompts: [prompts](./prompts.md).
 
+The optional Grok Voice realtime adapter (`realtime.kind = "grok"`) replaces the
+STT, LLM, and TTS stages with one speech-to-speech WebSocket. Its turn gap is
+dominated by provider processing and network RTT rather than the per-stage
+budgets below; measure it separately with the same script and phone.
+
 ## Why latency matters
 
 Conversation is turn-taking under tight timing. A natural gap between one

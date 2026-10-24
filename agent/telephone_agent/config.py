@@ -32,6 +32,7 @@ __all__ = [
     "Config",
     "ConfigError",
     "DialerConfig",
+    "RealtimeConfig",
     "ServerConfig",
     "ensure_e164",
     "load",
@@ -112,6 +113,38 @@ class BrainConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RealtimeConfig:
+    """Settings for a full-duplex speech-to-speech adapter.
+
+    ``kind = "off"`` leaves the existing text pipeline in charge.
+    ``kind = "grok"`` selects xAI's Grok Voice realtime API, which owns speech
+    recognition, the conversation model, turn detection, and speech synthesis in
+    one WebSocket session. The adapter streams the call downlink as PCM and plays
+    the returned PCM back into the uplink; it does not use
+    :class:`~telephone_agent.pipeline.Transcriber` or
+    :class:`~telephone_agent.pipeline.Synthesizer`.
+
+    ``api_key`` may be empty. The adapter first uses this value, then the
+    ``XAI_API_KEY`` environment variable, so the key never has to live in the
+    repository or the TOML file. ``base_url`` is the WebSocket endpoint without
+    the model query parameter.
+    """
+
+    kind: str = "off"
+    base_url: str = "wss://api.x.ai/v1/realtime"
+    api_key: str = field(default="", repr=False)
+    model: str = "grok-voice-latest"
+    voice: str = "eve"
+    instructions: str = ""
+    language: str = ""
+    reasoning_effort: str = "none"
+    vad_threshold: float = 0.5
+    prefix_padding_ms: int = 300
+    silence_duration_ms: int = 500
+    idle_timeout_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class AgentConfig:
     """Call-level policy: duration limits, endpointing, language, and consultations.
 
@@ -159,6 +192,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     dialer: DialerConfig = field(default_factory=DialerConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
+    realtime: RealtimeConfig = field(default_factory=RealtimeConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     phone_number: str = field(default="", repr=False)
@@ -206,12 +240,13 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
     except OSError as exc:
         raise ConfigError(f"cannot read config file {config_path}: {exc}") from exc
 
-    allowed = {"phone_number", "audio", "dialer", "brain", "agent", "server"}
+    allowed = {"phone_number", "audio", "dialer", "brain", "realtime", "agent", "server"}
     unknown = sorted(set(data) - allowed)
     if unknown:
         raise ConfigError(
             "unknown top-level configuration key(s): "
-            f"{', '.join(unknown)}; expected phone_number, audio, dialer, brain, agent, server"
+            f"{', '.join(unknown)}; expected phone_number, audio, dialer, brain, "
+            "realtime, agent, server"
         )
 
     config = Config(
@@ -219,6 +254,7 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
         audio=_build_section(AudioConfig, data.get("audio"), "audio"),
         dialer=_build_section(DialerConfig, data.get("dialer"), "dialer"),
         brain=_build_section(BrainConfig, data.get("brain"), "brain"),
+        realtime=_build_section(RealtimeConfig, data.get("realtime"), "realtime"),
         agent=_build_section(AgentConfig, data.get("agent"), "agent"),
         server=_build_section(ServerConfig, data.get("server"), "server"),
     )
@@ -237,6 +273,7 @@ def validate(config: Config) -> None:
     _validate_audio(config.audio)
     _validate_dialer(config.dialer)
     _validate_brain(config.brain)
+    _validate_realtime(config.realtime, config.audio)
     _validate_agent(config.agent)
     _validate_server(config.server)
     if config.phone_number:
@@ -358,6 +395,56 @@ def _validate_brain(brain: BrainConfig) -> None:
             )
 
 
+_REALTIME_RATES = {8_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000}
+
+
+def _validate_realtime(realtime: RealtimeConfig, audio: AudioConfig) -> None:
+    if realtime.kind not in {"off", "grok"}:
+        raise ConfigError(
+            f"realtime.kind must be 'off' or 'grok' (got {realtime.kind!r}); "
+            "'grok' selects xAI's speech-to-speech WebSocket API"
+        )
+    if realtime.kind == "off":
+        return
+
+    _validate_ws_url(realtime.base_url, "realtime.base_url")
+    if not realtime.model.strip():
+        raise ConfigError(
+            "realtime.model is required when realtime.kind = 'grok'; use "
+            "'grok-voice-latest' or a pinned version such as 'grok-voice-3.0'"
+        )
+    if not realtime.voice.strip():
+        raise ConfigError(
+            "realtime.voice is required when realtime.kind = 'grok'; use a "
+            "built-in voice id such as 'eve' or a custom voice id"
+        )
+    if realtime.reasoning_effort not in {"high", "none"}:
+        raise ConfigError(
+            "realtime.reasoning_effort must be 'high' or 'none' "
+            f"(got {realtime.reasoning_effort!r})"
+        )
+    if not math.isfinite(realtime.vad_threshold) or not 0.0 <= realtime.vad_threshold <= 1.0:
+        raise ConfigError(
+            f"realtime.vad_threshold must be between 0 and 1 (got {realtime.vad_threshold})"
+        )
+    if realtime.prefix_padding_ms < 0:
+        raise ConfigError(
+            f"realtime.prefix_padding_ms must be >= 0 (got {realtime.prefix_padding_ms})"
+        )
+    if realtime.silence_duration_ms < 0:
+        raise ConfigError(
+            f"realtime.silence_duration_ms must be >= 0 (got {realtime.silence_duration_ms})"
+        )
+    if realtime.idle_timeout_ms < 0:
+        raise ConfigError(f"realtime.idle_timeout_ms must be >= 0 (got {realtime.idle_timeout_ms})")
+    if audio.sample_rate not in _REALTIME_RATES:
+        supported = ", ".join(str(rate) for rate in sorted(_REALTIME_RATES))
+        raise ConfigError(
+            "audio.sample_rate must be one of the Grok Voice PCM rates when "
+            f"realtime.kind = 'grok' (got {audio.sample_rate}; supported: {supported})"
+        )
+
+
 def _validate_agent(agent: AgentConfig) -> None:
     if agent.max_call_seconds <= 0:
         raise ConfigError(f"agent.max_call_seconds must be > 0 (got {agent.max_call_seconds})")
@@ -426,6 +513,12 @@ def _validate_url(value: str, label: str) -> None:
         raise ConfigError(f"{label} must be an absolute http:// or https:// URL (got {value!r})")
 
 
+def _validate_ws_url(value: str, label: str) -> None:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+        raise ConfigError(f"{label} must be an absolute ws:// or wss:// URL (got {value!r})")
+
+
 def _build_section(cls: type[_T], raw: object, section: str) -> _T:
     if raw is None:
         raw = {}
@@ -472,6 +565,7 @@ def _apply_env(config: Config, env: Mapping[str, str]) -> Config:
         "audio": AudioConfig,
         "dialer": DialerConfig,
         "brain": BrainConfig,
+        "realtime": RealtimeConfig,
         "agent": AgentConfig,
         "server": ServerConfig,
     }

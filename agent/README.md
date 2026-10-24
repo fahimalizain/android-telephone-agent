@@ -8,9 +8,11 @@ and end the cellular call.
 
 The runtime is deliberately small. It uses only the Python standard library at
 runtime; `pytest` and `ruff` are development dependencies. It is a scaffold for
-the design, not a finished conversational agent: speech-to-text (STT),
-text-to-speech (TTS), scheduling, barge-in, and streaming are not bundled. The
-sections below explain exactly where those pieces belong.
+the design, not a finished conversational agent: the default text pipeline does
+not bundle speech-to-text (STT), text-to-speech (TTS), scheduling, barge-in, or
+streaming. An independent Grok Voice realtime adapter is included for
+full-duplex speech-to-speech; it bypasses the STT/brain/TTS seams. The sections
+below explain where the pieces belong.
 
 ## Prerequisites
 
@@ -50,6 +52,9 @@ sections below explain exactly where those pieces belong.
   disable USB audio routing. Verify routing with the hardware loopback procedure
   before relying on the agent.
 - For `brain.kind = "http"`, network access to an OpenAI-compatible endpoint.
+- For `realtime.kind = "grok"`, the optional `websockets` package and an xAI
+  API key in `XAI_API_KEY`. Install the extra with
+  `pip install -e ".[realtime]"` in `agent/`.
 
 The USB gadget's ALSA direction is inverted relative to a normal sound card.
 Recording from the gadget card receives the remote party; playing to the gadget
@@ -79,6 +84,12 @@ example below uses that path. Development tools are optional:
 
 ```bash
 pip install -e ".[dev]"
+```
+
+For the Grok Voice realtime adapter, also install the optional WebSocket client:
+
+```bash
+pip install -e ".[realtime]"
 ```
 
 For repository development, the root `Makefile` uses a root `.venv` instead:
@@ -163,6 +174,18 @@ actionable message.
 | `brain` | `max_tokens` | `200` | Maximum reply length requested from the provider. |
 | `brain` | `timeout_s` | `30.0` | Per-request timeout. |
 | `brain` | `action_mode` | `text` | `text` wraps the normal reply brain and never consults. `json` requires `kind = "http"` and asks the model for one JSON action per turn. |
+| `realtime` | `kind` | `off` | `off` keeps the text pipeline. `grok` selects the full-duplex Grok Voice speech-to-speech adapter and bypasses `[brain]`, `Transcriber`, and `Synthesizer` at runtime. |
+| `realtime` | `base_url` | `wss://api.x.ai/v1/realtime` | WebSocket endpoint without the model query parameter. |
+| `realtime` | `api_key` | empty | Optional xAI key. Prefer `XAI_API_KEY` or a service `EnvironmentFile` outside the repository. |
+| `realtime` | `model` | `grok-voice-latest` | Realtime model; pin a version such as `grok-voice-3.0` for reproducibility. |
+| `realtime` | `voice` | `eve` | Built-in voice id or a custom xAI voice id. |
+| `realtime` | `instructions` | built-in prompt | Optional system prompt. Empty uses the concise telephone prompt. |
+| `realtime` | `language` | empty | Optional BCP-47 transcription hint. Malayalam is not in xAI's documented realtime list as of 2026-10. |
+| `realtime` | `reasoning_effort` | `none` | `none` minimizes latency; `high` enables model reasoning. |
+| `realtime` | `vad_threshold` | `0.5` | Server VAD speech probability, 0-1. This is not the dBFS `agent.vad_threshold`. |
+| `realtime` | `prefix_padding_ms` | `300` | Server VAD audio retained before speech onset. |
+| `realtime` | `silence_duration_ms` | `500` | Server VAD silence before end of turn. |
+| `realtime` | `idle_timeout_ms` | `0` | Server re-engagement delay after a response; `0` disables it. |
 | `agent` | `schedule` | empty | Reserved for an external scheduler. The runtime does not read it in v0. |
 | `agent` | `max_call_seconds` | `300` | Hard call duration limit, counted from the start of dialing. |
 | `agent` | `silence_timeout_s` | `20.0` | Hang up after this much silence with no active utterance. Ringing time counts. |
@@ -256,11 +279,12 @@ to the brain, and hangs up at the silence limit, the call limit, an audio
 failure, or when interrupted with Ctrl-C. The process is one-shot; scheduling is
 external.
 
-In v0 this command runs in **scaffold mode** unless you add speech adapters. It
-detects utterances, sends a clearly marked placeholder transcript to the brain,
-and logs the reply instead of speaking it. `EchoBrain` is the default, so a
-complete run demonstrates call control, VAD, and brain plumbing without
-pretending to be a voice conversation. See the next section to make it audible.
+In v0 this command runs in **scaffold mode** unless you add speech adapters or
+set `realtime.kind = "grok"`. In scaffold mode it detects utterances, sends a
+clearly marked placeholder transcript to the brain, and logs the reply instead
+of speaking it. `EchoBrain` is the default, so a complete run demonstrates call
+control, VAD, and brain plumbing without pretending to be a voice conversation.
+See the next section to make it audible.
 
 The exit status is 0 for a completed call, 1 for a failed call or an interrupt,
 and 2 for a configuration error.
@@ -315,8 +339,9 @@ those controls exist, and do not port-forward it. See
 model.
 
 Without STT/TTS adapters, a delegated call uses placeholder transcripts and logs
-replies instead of speaking. The control plane still places, tracks, and cancels
-the call; it is not a natural voice conversation out of the box.
+replies instead of speaking. Set `realtime.kind = "grok"` to delegate the voice
+path to the realtime adapter instead. The control plane still places, tracks,
+and cancels the call.
 
 MCP clients call the five tools `place_call`, `get_call`, `answer_call`,
 `cancel_call`, and `list_calls`. A2A clients speak protocol 1.0, send
@@ -393,6 +418,63 @@ does not meet the latency budget in the design brief. For production:
 
 Without those changes the pipeline is utterance-at-a-time and cannot stop
 speaking when the caller interrupts.
+
+## Grok Voice realtime adapter
+
+`telephone_agent/grok_realtime.py` is an independent adapter for xAI's
+[Grok Voice speech-to-speech API](https://docs.x.ai/developers/model-capabilities/audio/voice-agent).
+It is not built on `Brain`, `Transcriber`, or `Synthesizer`. One WebSocket
+session performs speech recognition, turn detection, the conversation model,
+and speech synthesis, and the adapter streams the call audio in both directions.
+
+Enable it in the TOML file:
+
+```toml
+[realtime]
+kind = "grok"
+model = "grok-voice-latest"
+voice = "eve"
+# Optional: prefer XAI_API_KEY in the service environment instead.
+# api_key = ""
+```
+
+Install the optional client and export the key outside the repository:
+
+```bash
+cd agent
+pip install -e ".[realtime]"
+export XAI_API_KEY='...'   # or use systemd EnvironmentFile=
+```
+
+The key is never logged. The example configuration leaves `api_key` empty; prefer
+`XAI_API_KEY` or a systemd `EnvironmentFile` outside the repository. `doctor`
+reports whether a key is configured without printing it:
+
+```bash
+telephone-agent --config ../config/config.toml doctor
+```
+
+The adapter speaks 16-bit PCM over the WebSocket's binary transport at
+`audio.sample_rate`. Server-side VAD supplies end-of-turn detection, and
+`input_audio_buffer.speech_started` stops local playback immediately, so barge-in
+does not depend on the local energy detector. The model can call two tools:
+`end_call` (after saying goodbye) and, on a delegated `serve` call, `consult`
+(the same `ConsultationBroker` used by the deliberative text brain). The call
+objective from MCP/A2A is included in the system instructions.
+
+Caveats:
+
+- **Language coverage.** xAI's documented realtime languages do not include
+  Malayalam as of 2026-10. Hindi, Bengali, and English are documented; test
+  Malayalam-English code-mixing before relying on it.
+- **Audio rate.** The configured `audio.sample_rate` must be one of 8000, 16000,
+  22050, 24000, 32000, 44100, or 48000 Hz. The 16 kHz default is accepted and
+  avoids resampling.
+- **Cost and privacy.** Speech-to-speech is billed per minute of audio and call
+  audio leaves the LAN for xAI. The adapter does not write audio to disk.
+- **No fallback.** If the WebSocket cannot be established, the call ends as a
+  failed turn after the helper is asked to hang up. There is no local speech
+  fallback in this adapter.
 
 ## systemd
 
@@ -509,20 +591,22 @@ workflow runs `ruff check` and `pytest` on Python 3.11, 3.12, and 3.13. Python
 
 ## Limitations
 
-- **No STT or TTS adapters are bundled.** `run` and `serve` use placeholder
-  transcripts and log replies unless adapters are injected.
+- **The text pipeline has no STT or TTS adapters.** `run` and `serve` use
+  placeholder transcripts and log replies on the default path. The independent
+  `realtime.kind = "grok"` adapter provides full-duplex speech instead.
 - **No control-plane access controls.** `serve` has one shared admin token and
   no destination allowlist, per-requester budget, requester identity, rate
   limit, or queue-depth limit. Keep it on a trusted network.
 - **A2A consultation timeouts are stale.** If a consultation times out while
   the A2A task is `TASK_STATE_INPUT_REQUIRED`, the task stays in that state until
   the requester sends another message.
-- **No barge-in.** Playback blocks capture. The caller cannot interrupt the
-  agent, and the agent may talk over the caller if VAD finds an utterance during
-  playback.
-- **Energy VAD, not a speech model.** Fan noise, road noise, or a loud room can
-  hold a turn open. Tune `agent.vad_threshold` and the endpointing constants in
-  `vad.py` for the deployment.
+- **No barge-in on the text pipeline.** Playback blocks capture there. The
+  Grok Voice adapter is full-duplex and stops playback on server VAD speech
+  onset.
+- **Energy VAD, not a speech model, on the text pipeline.** Fan noise, road
+  noise, or a loud room can hold a turn open. Tune `agent.vad_threshold` and the
+  endpointing constants in `vad.py` for the deployment. The realtime adapter
+  uses Grok's server VAD instead.
 - **No answer detection.** The helper is assumed to return when the call is
   placed, not when it is answered. Ringing time counts against
   `agent.silence_timeout_s` and `agent.max_call_seconds`. If the helper can
@@ -618,6 +702,7 @@ agent/
     dialer.py             helper HTTP client with retries and idempotency
     actions.py            Speak/Consult/HangUp actions and BrainActionAdapter
     brain.py              Brain protocol, EchoBrain, HttpBrain, HttpDeliberativeBrain
+    grok_realtime.py      independent xAI Grok Voice speech-to-speech adapter
     consult.py            consultation broker for mid-call questions
     pipeline.py           CallSession state machine, consultation, adapter seams
     service.py            task queue, task state, and audit log

@@ -72,6 +72,47 @@ Do not use markdown, lists, or stage directions."""
 max_tokens = 200
 timeout_s = 30.0
 
+[realtime]
+# "off" keeps the text pipeline above. "grok" selects xAI's full-duplex
+# speech-to-speech WebSocket API, which replaces the STT, LLM, and TTS stages
+# with one session. The adapter is independent: it does not use [brain] or the
+# Transcriber/Synthesizer seams.
+kind = "off"
+
+# WebSocket endpoint without the model query parameter. The adapter appends
+# ?model=<model>.
+base_url = "wss://api.x.ai/v1/realtime"
+
+# Prefer the XAI_API_KEY environment variable, or a systemd EnvironmentFile
+# outside the repository. Do not commit a key here. A TELEPHONE_AGENT_REALTIME__
+# API_KEY override also works.
+# api_key = ""
+
+# Realtime model and built-in voice id.
+model = "grok-voice-latest"
+voice = "eve"
+
+# Optional system prompt. Empty uses the adapter's concise telephone prompt.
+instructions = ""
+
+# Optional BCP-47 transcription hint, for example "en-IN". The adapter passes it
+# to Grok's input transcription; unsupported codes fall back to auto-detection.
+# Malayalam is not in xAI's documented realtime language list as of 2026-10.
+language = ""
+
+# "none" minimizes latency; "high" enables model reasoning.
+reasoning_effort = "none"
+
+# Server-side VAD. threshold is a speech probability between 0 and 1, unlike
+# agent.vad_threshold, which is dBFS for the local energy detector.
+vad_threshold = 0.5
+prefix_padding_ms = 300
+silence_duration_ms = 500
+
+# Let the server re-engage after this much silence. 0 disables it and leaves
+# silence handling to agent.silence_timeout_s.
+idle_timeout_ms = 0
+
 [agent]
 # Reserved for an external scheduler (systemd timer, cron, or a future
 # controller). The reference runtime does not schedule calls itself.
