@@ -32,6 +32,7 @@ __all__ = [
     "Config",
     "ConfigError",
     "DialerConfig",
+    "ServerConfig",
     "ensure_e164",
     "load",
     "validate",
@@ -122,6 +123,24 @@ class AgentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ServerConfig:
+    """Settings for the MCP and A2A control-plane listeners.
+
+    Both listeners share one bearer token and one :class:`CallService`. The
+    default host is loopback, so a server is not reachable from the LAN unless
+    the operator opts in. ``token`` is required by the ``serve`` command but is
+    allowed to be empty here so ``doctor`` and ``selftest`` still work.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 8765
+    a2a_port: int = 8766
+    token: str = field(default="", repr=False)
+    public_url: str = ""
+    audit_log: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Top-level runtime configuration.
 
@@ -134,6 +153,7 @@ class Config:
     dialer: DialerConfig = field(default_factory=DialerConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
     phone_number: str = field(default="", repr=False)
 
 
@@ -179,12 +199,12 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
     except OSError as exc:
         raise ConfigError(f"cannot read config file {config_path}: {exc}") from exc
 
-    allowed = {"phone_number", "audio", "dialer", "brain", "agent"}
+    allowed = {"phone_number", "audio", "dialer", "brain", "agent", "server"}
     unknown = sorted(set(data) - allowed)
     if unknown:
         raise ConfigError(
             "unknown top-level configuration key(s): "
-            f"{', '.join(unknown)}; expected phone_number, audio, dialer, brain, agent"
+            f"{', '.join(unknown)}; expected phone_number, audio, dialer, brain, agent, server"
         )
 
     config = Config(
@@ -193,6 +213,7 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
         dialer=_build_section(DialerConfig, data.get("dialer"), "dialer"),
         brain=_build_section(BrainConfig, data.get("brain"), "brain"),
         agent=_build_section(AgentConfig, data.get("agent"), "agent"),
+        server=_build_section(ServerConfig, data.get("server"), "server"),
     )
     config = _apply_env(config, os.environ if env is None else env)
     validate(config)
@@ -210,6 +231,7 @@ def validate(config: Config) -> None:
     _validate_dialer(config.dialer)
     _validate_brain(config.brain)
     _validate_agent(config.agent)
+    _validate_server(config.server)
     if config.phone_number:
         ensure_e164(config.phone_number)
 
@@ -345,6 +367,43 @@ def _validate_agent(agent: AgentConfig) -> None:
         raise ConfigError("agent.language is required; use a BCP-47 tag such as en-IN")
 
 
+def _validate_server(server: ServerConfig) -> None:
+    if not isinstance(server.host, str) or not server.host.strip():
+        raise ConfigError(
+            "server.host is required; use 127.0.0.1 for loopback or a LAN address "
+            "when another host must connect"
+        )
+    if "://" in server.host or "/" in server.host:
+        raise ConfigError(
+            "server.host must be a hostname or IP address without a scheme or path "
+            f"(got {server.host!r})"
+        )
+    _validate_port(server.port, "server.port")
+    _validate_port(server.a2a_port, "server.a2a_port")
+    if server.port == server.a2a_port:
+        raise ConfigError(
+            f"server.port (MCP) and server.a2a_port (A2A) must differ (both are {server.port})"
+        )
+    if server.token and len(server.token) < 8:
+        raise ConfigError(
+            "server.token must be at least 8 characters when set; prefer "
+            "TELEPHONE_AGENT_SERVER__TOKEN over storing it in the config file"
+        )
+    if server.public_url:
+        _validate_url(server.public_url, "server.public_url")
+    if server.audit_log and (not isinstance(server.audit_log, str) or not server.audit_log.strip()):
+        raise ConfigError(
+            "server.audit_log must be a non-empty path when set; omit it to disable the audit log"
+        )
+
+
+def _validate_port(port: object, label: str) -> None:
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise ConfigError(f"{label} must be an integer (got {port!r})")
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"{label} must be between 1 and 65535 (got {port})")
+
+
 def _validate_url(value: str, label: str) -> None:
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -398,6 +457,7 @@ def _apply_env(config: Config, env: Mapping[str, str]) -> Config:
         "dialer": DialerConfig,
         "brain": BrainConfig,
         "agent": AgentConfig,
+        "server": ServerConfig,
     }
 
     for name, raw in sorted(env.items()):

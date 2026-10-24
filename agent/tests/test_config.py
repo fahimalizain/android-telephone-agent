@@ -12,6 +12,7 @@ from telephone_agent.config import (
     Config,
     ConfigError,
     DialerConfig,
+    ServerConfig,
     ensure_e164,
     load,
     validate,
@@ -49,6 +50,13 @@ def test_load_applies_defaults(tmp_path: Path) -> None:
     assert config.agent == AgentConfig()
     assert config.brain.max_tokens == 200
     assert config.agent.vad_threshold == -40.0
+    assert config.server == ServerConfig()
+    assert config.server.host == "127.0.0.1"
+    assert config.server.port == 8765
+    assert config.server.a2a_port == 8766
+    assert config.server.token == ""
+    assert config.server.public_url == ""
+    assert config.server.audit_log == ""
 
 
 def test_load_reads_all_sections(tmp_path: Path) -> None:
@@ -137,6 +145,85 @@ def test_environment_overrides_toml(tmp_path: Path) -> None:
     assert config.brain.api_key == ""
     assert config.agent.silence_timeout_s == 7.5
     assert config.agent.vad_threshold == -30.0
+
+
+def test_environment_overrides_server(tmp_path: Path) -> None:
+    env = {
+        "TELEPHONE_AGENT_SERVER__HOST": "192.168.1.50",
+        "TELEPHONE_AGENT_SERVER__PORT": "9200",
+        "TELEPHONE_AGENT_SERVER__A2A_PORT": "9201",
+        "TELEPHONE_AGENT_SERVER__TOKEN": "env-server-token",
+        "TELEPHONE_AGENT_SERVER__PUBLIC_URL": "https://agent.example.invalid",
+        "TELEPHONE_AGENT_SERVER__AUDIT_LOG": "/tmp/audit.jsonl",
+    }
+
+    config = load(_write(tmp_path), env=env)
+
+    assert config.server.host == "192.168.1.50"
+    assert config.server.port == 9200
+    assert config.server.a2a_port == 9201
+    assert config.server.token == "env-server-token"
+    assert config.server.public_url == "https://agent.example.invalid"
+    assert config.server.audit_log == "/tmp/audit.jsonl"
+
+
+def test_load_reads_server_section(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        BASE_CONFIG
+        + """
+[server]
+host = "0.0.0.0"
+port = 9100
+a2a_port = 9101
+token = "server-secret"
+public_url = "https://agent.example.invalid"
+audit_log = "/var/log/telephone-agent/audit.jsonl"
+""",
+    )
+
+    config = load(path, env={})
+
+    assert config.server.host == "0.0.0.0"
+    assert config.server.port == 9100
+    assert config.server.a2a_port == 9101
+    assert config.server.token == "server-secret"
+    assert config.server.public_url == "https://agent.example.invalid"
+    assert config.server.audit_log == "/var/log/telephone-agent/audit.jsonl"
+    assert "server-secret" not in repr(config)
+
+
+@pytest.mark.parametrize(
+    "server_block, message",
+    [
+        ('[server]\nhost = ""', "server.host is required"),
+        ('[server]\nhost = "http://127.0.0.1"', "without a scheme"),
+        ('[server]\nhost = "127.0.0.1/api"', "without a scheme or path"),
+        ("[server]\nport = 0", "server.port"),
+        ("[server]\nport = 65536", "server.port"),
+        ('[server]\nport = "8765"', "server.port must be an integer"),
+        ("[server]\na2a_port = 0", "server.a2a_port"),
+        ("[server]\na2a_port = 70000", "server.a2a_port"),
+        ("[server]\nport = 9000\na2a_port = 9000", "must differ"),
+        ('[server]\ntoken = "short"', "at least 8"),
+        ('[server]\npublic_url = "ftp://agent.example.invalid"', "server.public_url"),
+        ('[server]\npublic_url = "not-a-url"', "absolute http"),
+        ('[server]\naudit_log = "   "', "non-empty path"),
+    ],
+)
+def test_server_validation(tmp_path: Path, server_block: str, message: str) -> None:
+    path = _write(tmp_path, f"{BASE_CONFIG}\n{server_block}\n")
+
+    with pytest.raises(ConfigError, match=message):
+        load(path, env={})
+
+
+def test_empty_server_token_is_allowed_at_load_time(tmp_path: Path) -> None:
+    path = _write(tmp_path, f'{BASE_CONFIG}\n[server]\ntoken = ""\n')
+
+    config = load(path, env={})
+
+    assert config.server.token == ""
 
 
 def test_unrelated_environment_is_ignored(tmp_path: Path) -> None:

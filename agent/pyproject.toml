@@ -28,6 +28,11 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+server = [
+  "mcp>=2.3,<3",
+  "a2a-sdk>=1.2,<2",
+  "uvicorn>=0.30",
+]
 
 [project.scripts]
 telephone-agent = "telephone_agent.__main__:main"
