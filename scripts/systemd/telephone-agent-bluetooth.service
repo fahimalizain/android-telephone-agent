@@ -11,10 +11,10 @@ Wants=pipewire.service wireplumber.service
 Type=oneshot
 # %h is the user's home directory. Change the paths if the repository lives
 # elsewhere. The .venv must contain the telephone-agent console script.
-WorkingDirectory=%h/android-telephone-agent/agent
+WorkingDirectory=%h/android-telephone-agent
 EnvironmentFile=-%h/android-telephone-agent/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/android-telephone-agent/agent/.venv/bin/telephone-agent --config %h/android-telephone-agent/config/config.toml run
+ExecStart=%h/android-telephone-agent/.venv/bin/telephone-agent --config %h/android-telephone-agent/config/config.toml run
 TimeoutStartSec=900
 # One activation is one call. Do not add Restart=always: a restart would
 # redial. Retries and idempotency belong in the runtime and the slot logic.
