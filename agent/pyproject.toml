@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "android-telephone-agent contributors" }]
-keywords = ["telephony", "raspberry-pi", "bluetooth", "hfp", "pipewire", "voice-agent"]
+keywords = ["telephony", "bluetooth", "hfp", "pipewire", "voice-agent"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",

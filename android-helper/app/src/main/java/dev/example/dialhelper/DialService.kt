@@ -46,8 +46,8 @@ import kotlin.concurrent.thread
  *
  * Design notes:
  * - A foreground service keeps a raw ServerSocket alive while the phone charges.
- * - The phone is a USB host during normal operation, so adb is not available and
- *   this LAN endpoint is the supported control path.
+ * - The phone normally sits on a charger away from a development host, so adb may
+ *   be unavailable and this LAN endpoint is the supported control path.
  * - Calls are placed through TelecomManager with an explicit PhoneAccountHandle so
  *   One UI does not show a SIM picker on dual-SIM devices.
  */

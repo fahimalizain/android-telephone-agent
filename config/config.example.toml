@@ -133,7 +133,7 @@ max_call_seconds = 300
 # time also counts because v0 has no answer detection.
 silence_timeout_s = 20.0
 # dBFS. Frames at or below this level are silence. Tune this in the room where
-# the Pi and Phone A will operate; -40 is a starting point, not a guarantee.
+# the host and Phone A will operate; -40 is a starting point, not a guarantee.
 vad_threshold = -40.0
 # BCP-47 tag used to label the call and passed to future speech adapters.
 language = "en-IN"
