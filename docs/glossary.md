@@ -53,9 +53,10 @@ the HF in this project.
 call control and SCO or eSCO audio. The phone is the audio gateway (AG); the headset or
 car kit is the hands-free unit (HF). HFP is the only supported audio transport here.
 
-**inbound.** A call from a person to the agent's SIM. The opt-in inbound watcher polls the
-helper, answers the call, and runs a Grok Voice session. It is implemented and unit-tested
-but not live-validated, and it answers every call with no caller-ID filter.
+**inbound.** A call from a person to the agent's SIM. The daemon's opt-in inbound watcher
+polls the helper, answers the call, and runs a Grok Voice session. It runs in the same
+daemon as outbound calls and shares the one call slot with them, and it answers every call
+with no caller-ID filter.
 
 **journald volatile.** A systemd-journald setting that keeps logs in RAM and discards
 them on reboot, reducing disk writes.

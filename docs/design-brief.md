@@ -275,9 +275,14 @@ rate. Do not optimize for hi-fi; optimize for latency and turn-taking.
 
 ## 11. Operations
 
-- 24/7 operation on the Linux host. A systemd **user** timer triggers a one-shot user
-  unit for each call slot; the unit must not restart automatically, or it would redial.
-  A host watchdog may reboot a hung machine where available.
+- 24/7 operation on the Linux host. One long-lived `telephone-agent daemon` systemd
+  **user** service owns the audio path, serves outbound calls from `run` over a local Unix
+  socket, and runs the inbound watcher in the same process. A systemd user timer triggers a
+  one-shot client unit for each call slot; the client submits one call and waits, and it
+  must not restart automatically, or it would submit another call. The daemon itself may
+  restart because it serves calls rather than dialing at startup. `serve` is a separate
+  MCP/A2A control plane that also owns the audio path; do not run it with the daemon. A
+  host watchdog may reboot a hung machine where available.
 - journald may use volatile storage to reduce disk writes on an SSD or SD-backed host;
   this is optional on a desktop.
 - Daily heartbeat to Telegram/ntfy: call placed, duration, outcome. Alert if the call
@@ -363,9 +368,9 @@ scripts/
   build-helper.sh
   install-helper.sh
   helper-smoke-test.sh
+  systemd/telephone-agent-daemon.service
   systemd/telephone-agent-bluetooth.service
   systemd/telephone-agent-bluetooth.timer
-  systemd/telephone-agent-inbound.service
 agent/
   pyproject.toml
   README.md
@@ -392,11 +397,13 @@ android-helper/
    out of scope for the first milestone.
 5. Whether to support inbound PSTN calls as well as outbound.
 
-   **Resolved (2026-10-24).** Implemented as an opt-in `inbound` daemon: the helper
-   exposes `GET /state` and `POST /answer`, and the daemon polls, answers, and runs one
-   Grok Voice session per call. Bluetooth carries audio only, so HFP has no ringing signal
-   and the SCO nodes appear only after the call is answered. It answers every call with no
-   caller-ID filter. The daemon is unit-tested and one live inbound PSTN call was validated
+   **Resolved (2026-10-24).** Implemented as an opt-in inbound mode in the long-lived
+   daemon: the helper exposes `GET /state` and `POST /answer`, and the daemon's watcher
+   polls, answers, and runs one Grok Voice session per call. The same daemon serves
+   outbound `run` requests and serializes them with inbound calls. Bluetooth carries audio
+   only, so HFP has no ringing signal and the SCO nodes appear only after the call is
+   answered. It answers every call with no caller-ID filter. The daemon is unit-tested and
+   one live inbound PSTN call was validated
    on 2026-10-24: the helper answered after the watcher's 1 s delay and the session ran
    four turns in 39.0 s before a model-requested hangup. Locked-screen answering and vendor
    restrictions on `acceptRingingCall()` remain unverified. See

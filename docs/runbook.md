@@ -4,10 +4,12 @@ Procedures for a single operator when a call fails, audio is wrong, or the host 
 is unreachable. Each incident lists the symptom, impact, diagnostic commands, fix, and
 prevention.
 
-The reference deployment runs a systemd **user** timer and service for outbound calls, an
-optional inbound user service, and a helper on port 8765. Call control uses the token in
-the host environment file; `/health` is unauthenticated. Confirm paths before use, and
-verify device-specific behavior on your device.
+The reference deployment runs one long-lived daemon systemd **user** service for inbound
+and outbound calls, a one-shot outbound client triggered by a user timer, and a helper on
+port 8765. The client submits one call to the daemon; the daemon owns the audio path and
+serializes calls. Call control uses the token in the host environment file; `/health` is
+unauthenticated. Confirm paths before use, and verify device-specific behavior on your
+device.
 
 ```bash
 export PHONE_HOST="192.168.1.50"    # DHCP reservation; verify
@@ -21,8 +23,9 @@ export PROVIDER_HEALTH_URL="https://$PROVIDER_HOST/health"
 Related: [operations](./operations.md), [troubleshooting](./troubleshooting.md),
 [Bluetooth HFP](./bluetooth-hfp.md), [Inbound calls](./inbound.md),
 [Android setup](./android-setup.md), the
-[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), and the
-[inbound user service](../scripts/systemd/telephone-agent-inbound.service).
+[daemon user service](../scripts/systemd/telephone-agent-daemon.service), the
+[outbound client service](../scripts/systemd/telephone-agent-bluetooth.service), and the
+[Bluetooth timer](../scripts/systemd/telephone-agent-bluetooth.timer).
 
 ## First 5 minutes
 
@@ -30,8 +33,9 @@ Related: [operations](./operations.md), [troubleshooting](./troubleshooting.md),
    anything else.
 2. Check power: host powered, phone charging indicator.
 3. From the LAN, ping the host and query the phone helper.
-4. Run `systemctl --user --failed` and
-   `journalctl --user -p err -b --no-pager | tail -n 40`.
+4. Run `systemctl --user --failed`,
+   `journalctl --user -p err -b --no-pager | tail -n 40`, and
+   `systemctl --user status telephone-agent-daemon.service --no-pager`.
 5. Run `./scripts/bluetooth-check.sh --idle "$BT_ADDRESS"` and, if a call is active,
    `./scripts/bluetooth-check.sh "$BT_ADDRESS"`.
 6. Run `timedatectl`; it must show synchronized and `Asia/Kolkata`.
@@ -58,17 +62,23 @@ the audio path is already unusable.
 
 ```bash
 date -Is; timedatectl
+systemctl --user status telephone-agent-daemon.service --no-pager
 systemctl --user status telephone-agent-bluetooth.service --no-pager
 systemctl --user list-timers --all | grep -i telephone
-journalctl --user -u telephone-agent-bluetooth.service --since "today 00:00" --no-pager | tail -n 120
+journalctl --user -u telephone-agent-daemon.service --since "today 00:00" --no-pager | tail -n 120
+journalctl --user -u telephone-agent-bluetooth.service --since "today 00:00" --no-pager | tail -n 60
 curl -fsS --max-time 3 "http://$PHONE_HOST:8765/health"
 ```
 
-Look for `call_skipped`, `missed_slot`, `duplicate_slot`, timer activation lines, and
-`inactive (dead)`.
+Look for `call_skipped`, `missed_slot`, `duplicate_slot`, `busy`, timer activation lines,
+and `inactive (dead)`. The client log shows whether the timer fired and whether the
+request reached the daemon; the daemon log shows call setup, audio, and the result.
 
-**Fix.** Fix the first unit error. If the timer did not fire, correct its expression or
-time zone, then `systemctl --user daemon-reload` and check
+**Fix.** Start or fix the daemon first: the client exits with status 1 and "start
+telephone-agent-daemon.service" when no daemon is listening. If the client reports the
+daemon rejected the call as busy, an inbound or other outbound call was already active;
+treat the slot as skipped and do not retry into the active call. If the timer did not
+fire, correct its expression or time zone, then `systemctl --user daemon-reload` and check
 `systemctl --user list-timers --all`. If the slot is inside the grace window, trigger the
 documented test path; otherwise record the miss, alert, and wait.
 
@@ -86,7 +96,7 @@ lingering.
 ./scripts/bluetooth-check.sh "$BT_ADDRESS"
 ./scripts/bluetooth-audio-test.sh list
 ./scripts/bluetooth-audio-test.sh tone 2
-journalctl --user -u telephone-agent-bluetooth.service -n 120 --no-pager | grep -iE 'playback|tts|sco|pipewire|error'
+journalctl --user -u telephone-agent-daemon.service -n 120 --no-pager | grep -iE 'playback|tts|sco|pipewire|error'
 pw-dump | grep -E 'bluez_(input|output)\.|api\.bluez5\.sco'
 ```
 
@@ -112,7 +122,7 @@ reverse.
 ./scripts/bluetooth-check.sh "$BT_ADDRESS"
 ./scripts/bluetooth-audio-test.sh record 5 /tmp/downlink.wav
 ./scripts/bluetooth-audio-test.sh tone 2
-journalctl --user -u telephone-agent-bluetooth.service -n 120 --no-pager | grep -iE 'capture|playback|rms|silence|sco'
+journalctl --user -u telephone-agent-daemon.service -n 120 --no-pager | grep -iE 'capture|playback|rms|silence|sco'
 ```
 
 `record` tests the downlink (callee to agent); `tone` tests the uplink (agent to callee).
@@ -246,7 +256,7 @@ read -rsp 'Helper token: ' HELPER_TOKEN; echo
 curl -fsS --max-time 3 -H "Authorization: Bearer $HELPER_TOKEN" \
   "http://$PHONE_HOST:8765/state"
 unset HELPER_TOKEN
-journalctl --user -u telephone-agent-bluetooth.service -n 120 --no-pager | grep -iE 'hangup|end_call|max_duration'
+journalctl --user -u telephone-agent-daemon.service -n 120 --no-pager | grep -iE 'hangup|end_call|max_duration'
 ./scripts/bluetooth-check.sh "$BT_ADDRESS" || true
 ```
 
@@ -271,7 +281,7 @@ ping -c 20 1.1.1.1
 curl -o /dev/null -s -w 'dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} first=%{time_starttransfer} total=%{time_total}\n' "https://$PROVIDER_HOST/"
 top -b -n1 | head -n 15
 iw dev wlan0 link 2>/dev/null || true
-journalctl --user -u telephone-agent-bluetooth.service -n 200 --no-pager | grep -iE 'latency|stt|llm|tts|turn|timeout'
+journalctl --user -u telephone-agent-daemon.service -n 200 --no-pager | grep -iE 'latency|stt|llm|tts|turn|timeout'
 ```
 
 Compare with the latency budget in the [design brief](./design-brief.md); check loss,
@@ -317,7 +327,7 @@ fails.
 
 ```bash
 curl -fsS -o /dev/null -w '%{http_code}\n' "$PROVIDER_HEALTH_URL"
-journalctl --user -u telephone-agent-bluetooth.service -n 200 --no-pager | grep -iE '401|403|429|5[0-9][0-9]|auth|quota'
+journalctl --user -u telephone-agent-daemon.service -n 200 --no-pager | grep -iE '401|403|429|5[0-9][0-9]|auth|quota'
 date -Is
 getent hosts "$PROVIDER_HOST"
 ```
@@ -333,40 +343,41 @@ endpoint.
 **Prevent.** Alert on balance and key expiry, configure two providers where possible, and
 run the T-60 provider check.
 
-## 13. Inbound service not answering
+## 13. Inbound calls not answered
 
-**Symptom.** A call to the agent SIM rings but the agent never answers, or the inbound
-service is stopped.
+**Symptom.** A call to the agent SIM rings but the agent never answers, or the daemon is
+stopped.
 **Impact.** Missed inbound calls; the phone may stay offhook and block the next call; S2.
 **Diagnose.** Run the user-unit commands as the account that owns the PipeWire session:
 
 ```bash
-systemctl --user status telephone-agent-inbound.service --no-pager
-journalctl --user -u telephone-agent-inbound.service -n 120 --no-pager
+systemctl --user status telephone-agent-daemon.service --no-pager
+journalctl --user -u telephone-agent-daemon.service -n 120 --no-pager
 read -rsp 'Helper token: ' HELPER_TOKEN; echo
 curl -fsS --max-time 3 -H "Authorization: Bearer $HELPER_TOKEN" \
   "http://$PHONE_HOST:8765/state"
 unset HELPER_TOKEN
 ```
 
-Expect `active (running)`, no `inbound requires realtime.kind = 'grok'` error, and a
+Expect `active (running)`, no `daemon requires realtime.kind = 'grok'` error, and a
 `{"state":"..."}` response. A call should move from `ringing` to `offhook` within about one
 poll interval after the daemon answers. For a supervised check, call the agent SIM from
 another handset and watch `/state` and the journal through answer, greeting, and hangup.
 Confirm `[realtime].kind = "grok"` and that the service environment has `XAI_API_KEY`.
 
-**Fix.** Start or restart the unit with
-`systemctl --user restart telephone-agent-inbound.service`. If `/answer` returns `403`,
-grant `ANSWER_PHONE_CALLS` and unlock the phone: `acceptRingingCall()` is best effort for a
+**Fix.** Start the daemon with
+`systemctl --user start telephone-agent-daemon.service`. Use `restart` only when no call is
+active: a restart cancels the active call. If `/answer` returns `403`, grant
+`ANSWER_PHONE_CALLS` and unlock the phone: `acceptRingingCall()` is best effort for a
 non-default dialer. A `409` means the call stopped ringing or was answered manually. A
-`500` means Android threw; check the helper log. If the unit cannot see PipeWire, run it in
-the PipeWire user session and enable lingering. If the state is `offhook` but the caller
+`500` means Android threw; check the helper log. If the daemon cannot see PipeWire, run it
+in the PipeWire user session and enable lingering. If the state is `offhook` but the caller
 hears silence, check the SCO nodes with `./scripts/bluetooth-check.sh "$BT_ADDRESS"` during
 the call.
 
 **Prevent.** Run one supervised inbound call after each phone or One UI update, keep the
-unit enabled with `Restart=always`, and alert when the unit is inactive or the helper has
-not reached `idle` after a call.
+daemon enabled with `Restart=always`, and alert when it is inactive or the helper has not
+reached `idle` after a call.
 
 ## 14. Transcript retention and cleanup
 
@@ -400,5 +411,6 @@ that hid the signal.
 [Operations](./operations.md), [troubleshooting](./troubleshooting.md),
 [Bluetooth HFP](./bluetooth-hfp.md), [Inbound calls](./inbound.md),
 [Android setup](./android-setup.md), the
-[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), and the
-[inbound user service](../scripts/systemd/telephone-agent-inbound.service).
+[daemon user service](../scripts/systemd/telephone-agent-daemon.service), the
+[outbound client service](../scripts/systemd/telephone-agent-bluetooth.service), and the
+[Bluetooth timer](../scripts/systemd/telephone-agent-bluetooth.timer).

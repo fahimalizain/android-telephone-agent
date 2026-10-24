@@ -119,7 +119,7 @@ distributions. A report is only useful if it identifies the setup:
 
 For helper or inbound failures, include the helper log (with numbers and tokens removed)
 and the relevant output of
-`journalctl --user -u telephone-agent-inbound.service`. Redact phone numbers, IMEI and SIM
+`journalctl --user -u telephone-agent-daemon.service`. Redact phone numbers, IMEI and SIM
 identifiers, tokens, and Wi-Fi credentials from logs before attaching them. State clearly
 whether you verified a behavior yourself or are reporting what a vendor documents.
 

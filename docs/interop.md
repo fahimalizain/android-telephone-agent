@@ -41,8 +41,9 @@ Prerequisites:
 - **No A2A timeout update.** If a consultation times out while an A2A task is
   `TASK_STATE_INPUT_REQUIRED`, the task stays in that state until the requester sends
   another message. See [A2A consultation timeout](#a2a-consultation-timeout).
-- **No raw audio over either protocol.** The opt-in inbound watcher is a separate runtime
-  mode; it is not controlled through MCP or A2A. The default text pipeline has no
+- **No raw audio over either protocol.** The opt-in inbound watcher runs in the daemon,
+  not in the MCP/A2A server, so it is not controlled through either protocol. Run `serve`
+  or `daemon`, not both: each owns the audio path. The default text pipeline has no
   barge-in.
 
 Until allowlists, budgets, requester identity, and rate limits exist, keep the
@@ -671,10 +672,10 @@ cannot be confirmed marks the task `failed` with reason `hangup_failed`.
 - **In-memory tasks.** Tasks and A2A task state do not survive a restart. The audit log
   is for audit, not recovery, and the final record omits the objective and full
   transcript.
-- **Inbound is separate.** The opt-in inbound watcher answers calls to the agent SIM and
-  runs a Grok Voice session. It is implemented but has not been live-validated on a PSTN
-  call, and it is not controlled over MCP or A2A. Inbound and outbound calls share the
-  one call slot.
+- **Inbound is separate from this control plane.** The daemon's opt-in inbound watcher
+  answers calls to the agent SIM and runs a Grok Voice session. It is not controlled over
+  MCP or A2A, and `serve` must not run at the same time as the daemon. Inbound and
+  outbound calls share the one call slot.
 - **No barge-in.** Playback blocks capture. The callee cannot interrupt the holding
   phrase or the agent's speech.
 - **Text only.** No audio, video, or screen sharing is accepted or returned. There is

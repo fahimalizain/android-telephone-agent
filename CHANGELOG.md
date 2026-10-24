@@ -17,8 +17,8 @@ The project is at alpha; minor versions may change APIs and file layout.
 - `audio.backend`, `audio.bluetooth_address`, and `audio.node_timeout_s`
   configuration, with Bluetooth examples and validation.
 - Bluetooth HFP setup, check, and audio-test scripts plus an ADR and host guide.
-- systemd user unit and timer examples for the Bluetooth outbound path and the
-  inbound watcher.
+- systemd user units for the long-lived daemon, the Bluetooth outbound client, and the
+  timer that triggers it.
 - Tests for SCO node discovery, Bluetooth configuration validation, and CLI
   backend wiring.
 - `CallService`, a long-lived, protocol-agnostic control plane with a FIFO task queue,
@@ -52,9 +52,9 @@ The project is at alpha; minor versions may change APIs and file layout.
   `doctor` checks for the realtime key and WebSocket client. The key is read from
   `XAI_API_KEY`; no credential is stored in the repository.
 - Inbound call answering: helper `GET /state` and `POST /answer`, an `inbound`
-  command and `InboundWatcher` that answers ringing calls and runs one Grok Voice
-  session, and a `telephone-agent-inbound.service` user unit. Auto-answer has no
-  caller-ID filter because the helper does not request `READ_CALL_LOG`.
+  debug command and `InboundWatcher` that answers ringing calls and runs one Grok Voice
+  session, served by the long-lived daemon unit. Auto-answer has no caller-ID filter
+  because the helper does not request `READ_CALL_LOG`.
 - Opening greeting: the configured `[realtime].greeting` is spoken once SCO audio is
   ready.
 - Opt-in local call transcripts: `[transcript]` writes one timestamped JSONL file per
@@ -63,6 +63,8 @@ The project is at alpha; minor versions may change APIs and file layout.
 
 ### Changed
 
+- one long-lived daemon for inbound and outbound; `run` submits to it by default,
+  `--direct` for in-process debugging; outbound timer is a client.
 - Inbound calls are live-validated once: on 2026-10-24 the helper answered a ringing PSTN
   call over Bluetooth HFP at mSBC, the Grok Voice session ran four turns in 39.0 s, and a
   model-requested `/hangup` returned the phone to idle. Locked-screen answering remains

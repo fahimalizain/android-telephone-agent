@@ -79,9 +79,10 @@ the SCO source and sink only **after** the call is answered, so the watcher answ
 and then starts audio; `[realtime].greeting` is spoken once those nodes are ready.
 
 Auto-answer has no caller-ID filter. The helper does not request `READ_CALL_LOG`, and
-`/state` returns only a phase. Inbound and outbound calls are mutually exclusive: the
-helper rejects `/call` while a call is ringing or active, and the watcher waits for `idle`
-before re-arming. The daemon is unit-tested and the helper endpoints are implemented. One
+`/state` returns only a phase. Only one call can be active: the helper rejects `/call`
+while a call is ringing or active, the watcher waits for `idle` before re-arming, and the
+daemon serializes its inbound watcher and `run` client requests. The daemon is unit-tested
+and the helper endpoints are implemented. One
 live inbound PSTN call was validated on 2026-10-24: the helper answered after the watcher's
 1 s delay, the SCO nodes appeared, the Grok Voice session opened and requested the
 configured opening greeting at 22:01:27, and the call ran four turns in 39.0 s before a
@@ -411,42 +412,62 @@ user does not share that session.
 
 The repository ships user units:
 
+- `scripts/systemd/telephone-agent-daemon.service`
 - `scripts/systemd/telephone-agent-bluetooth.service`
 - `scripts/systemd/telephone-agent-bluetooth.timer`
 
+The daemon is the one long-lived audio owner. It serves outbound calls from `run` over a
+local Unix socket and runs the inbound watcher in the same process, so inbound and
+outbound calls share one call slot and are serialized. The Bluetooth service is a
+`Type=oneshot` client: each activation submits one outbound call to the daemon with
+`run`, waits for the result, and exits. The timer triggers that client.
+
 They use `%h` for the home directory, assume the repository is at
-`~/android-telephone-agent`, and use the `agent/.venv` console script. Edit the `%h`-based
-paths (`WorkingDirectory`, `EnvironmentFile`, and `ExecStart`) if yours is elsewhere.
-Review the timer's `OnCalendar` value for your slot. The shipped timer uses
+`~/android-telephone-agent`, and use the repository root `.venv` console script. Edit the
+`%h`-based paths (`WorkingDirectory`, `EnvironmentFile`, and `ExecStart`) if yours is
+elsewhere. Review the timer's `OnCalendar` value for your slot. The shipped timer uses
 `Persistent=false` to match the operations policy: a missed slot is skipped rather than
-called late. Set it to `true` only if catch-up is acceptable. Install them as user units
-and enable the timer:
+called late. Set it to `true` only if catch-up is acceptable. Install them as user units,
+then enable the daemon and the timer:
 
 ```bash
 mkdir -p ~/.config/systemd/user
+install -m644 scripts/systemd/telephone-agent-daemon.service \
+  ~/.config/systemd/user/
 install -m644 scripts/systemd/telephone-agent-bluetooth.service \
   ~/.config/systemd/user/
 install -m644 scripts/systemd/telephone-agent-bluetooth.timer \
   ~/.config/systemd/user/
 sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
+systemctl --user enable --now telephone-agent-daemon.service
 systemctl --user enable --now telephone-agent-bluetooth.timer
 systemctl --user list-timers telephone-agent-bluetooth.timer
-journalctl --user -u telephone-agent-bluetooth.service -n 100 --no-pager
+journalctl --user -u telephone-agent-daemon.service -n 100 --no-pager
 ```
 
-The service is `Type=oneshot` and must not restart automatically; a restart would redial.
-It runs after `pipewire.service` and `wireplumber.service` and has `WantedBy=default.target`.
+The daemon is `Type=simple` with `Restart=always`, `RestartSec=5`, and
+`TimeoutStopSec=30`; it serves calls rather than dialing on startup, so a restart re-arms
+safely. The client is `Type=oneshot` and must not restart automatically; a restart would
+submit another call. It orders after `pipewire.service`, `wireplumber.service`, and
+`telephone-agent-daemon.service`, and `Wants` the daemon so a timer activation starts it if
+needed.
 
 `loginctl enable-linger` is important on a headless host. Without it, the user manager and
 PipeWire stop when the last session ends, and the timer does not fire reliably.
 
-Do not enable both an outbound timer and the inbound watcher for the same phone and call
-slot. Choose one mode and one scheduler. To run a supervised call instead of the timer:
+The timer can stay enabled alongside inbound answering. The daemon owns the one phone call
+slot; if a call is ringing or active at the slot, the helper rejects `/call` with `409` and
+the client request is rejected as busy, so the outbound call is skipped rather than run
+concurrently. There is no need to choose inbound or outbound mode. Do not run `serve`
+(MCP/A2A) or `run --direct` while the daemon is active: both would open a second audio
+owner.
+
+To run a supervised call instead of the timer:
 
 ```bash
 systemctl --user start telephone-agent-bluetooth.service
-journalctl --user -u telephone-agent-bluetooth.service -f
+journalctl --user -u telephone-agent-daemon.service -f
 ```
 
 ## 11. Troubleshooting
@@ -464,7 +485,7 @@ journalctl --user -u telephone-agent-bluetooth.service -f
 | Choppy audio, dropouts, or high latency | 2.4 GHz Wi-Fi coexistence, distance, or SCO retransmission | `pw-top`, `iw dev wlan0 link`, distance to the phone | Move the host and phone closer, change the Wi-Fi channel, reduce 2.4 GHz load |
 | Logs show CVSD instead of mSBC | Phone or adapter did not negotiate wideband | `./scripts/bluetooth-check.sh <mac>` during a call, or `wpctl inspect <node-id>` | No fix if the phone does not support it; the call still works at 8 kHz |
 | Agent reports an audio error when the call ends | SCO nodes disappeared with the call | Agent log, `pw-dump` after hangup | Expected; end the session cleanly and let the next call rediscover the nodes |
-| Service not running for inbound | Helper is reachable but the agent never answers | `systemctl --user status telephone-agent-inbound.service`, `journalctl --user -u telephone-agent-inbound.service -n 100` | Start or fix the unit; it must run in the PipeWire user session and use `realtime.kind = "grok"` |
+| Daemon not running for inbound | Helper is reachable but the agent never answers | `systemctl --user status telephone-agent-daemon.service`, `journalctl --user -u telephone-agent-daemon.service -n 100` | Start or fix the unit; it must run in the PipeWire user session and use `realtime.kind = "grok"` |
 | Phone rings but no SCO nodes appear | SCO exists only after the call is answered, or the phone kept audio on the earpiece | `curl` the helper's `/state`, phone call screen, `pw-dump` | Answer through `POST /answer` first; confirm **Calls and audio** and the Bluetooth route during the call |
 | `/answer` returns `403` | `ANSWER_PHONE_CALLS` is missing, or Android denied `acceptRingingCall()` | Helper log, app permissions | Grant the permission and unlock the phone; answering as a non-default dialer is best effort |
 | `/answer` returns `409` | The call stopped ringing, was answered manually, or the state is unreadable | `GET /state` | Expected race or state failure; do not retry, wait for the next call |

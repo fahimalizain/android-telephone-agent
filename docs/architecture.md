@@ -133,10 +133,22 @@ and needed a manual reconnect; Bluetooth was manually reconnected before the inb
 Latency measurements and HFP call control remain unvalidated. The cellular codec still
 caps fidelity.
 
+**One long-lived daemon.** The deployment runs `telephone-agent daemon` as
+`telephone-agent-daemon.service` in the PipeWire user session. It owns the audio path and
+the single-call executor. `run` is a client: it submits one outbound call over a local Unix
+socket and waits for the result. The inbound watcher runs in the same process and submits
+each answered call to the same executor, so inbound and outbound calls are serialized and
+the outbound timer can stay enabled. `inbound` and `run --direct` are foreground debug
+commands, not deployment units, and must not run while the daemon is active. A request
+that arrives while another call is active is rejected as busy rather than opening a second
+audio path.
+
 ## Control plane: MCP and A2A
 
 The voice path above is real-time. A separate asynchronous control plane lets other
-agents and LLM hosts delegate outbound calls without blocking for the call. Both
+agents and LLM hosts delegate outbound calls without blocking for the call. It is an
+alternative to the daemon's Unix-socket control plane, not a companion process: `serve`
+opens the audio path itself, so it must not run at the same time as `daemon`. Both
 protocol adapters are thin front ends over one `CallService`: a single FIFO task queue,
 one active call (one SIM and one audio path), in-memory task state, and an optional JSONL
 audit log. The control plane is implemented in the reference runtime. It is alpha: it
@@ -452,8 +464,9 @@ Carried from the [design brief](./design-brief.md); status as of 2026-10-24.
    cloud-only.
 4. **Call content and persona.** Briefing, check-in, or reminder; prompt design is out of scope.
 5. **Inbound calls. Implemented and validated once.** The helper exposes
-   `GET /state` and `POST /answer`; an `inbound` daemon polls and answers every ringing
-   call, then runs one Grok Voice session. One live inbound PSTN call succeeded on
+   `GET /state` and `POST /answer`; the daemon's inbound watcher polls and answers every
+   ringing call, then runs one Grok Voice session in the same process that serves `run`
+   requests. One live inbound PSTN call succeeded on
    2026-10-24: four turns in 39.0 s, with a model-requested hangup through the helper.
    Locked-screen answering and vendor restrictions on `acceptRingingCall()` remain
    unverified. Bluetooth carries audio only, so the SCO nodes appear after the answer,

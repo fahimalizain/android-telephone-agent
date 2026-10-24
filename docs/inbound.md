@@ -2,9 +2,10 @@
 
 The inbound path turns Phone A into an answering agent: the helper reports a
 ringing call over the LAN, the Linux host asks it to answer, and the Grok Voice
-realtime adapter handles the conversation. This document covers the signaling
-topology, the helper contract, configuration, systemd deployment, and the privacy
-limits you must accept before enabling auto-answer.
+realtime adapter handles the conversation. It runs inside the same long-lived
+daemon that serves outbound calls. This document covers the signaling topology,
+the helper contract, configuration, systemd deployment, and the privacy limits
+you must accept before enabling auto-answer.
 
 The outbound path is documented in [Voice agent](voice-agent.md) and
 [Architecture](architecture.md). The helper's full API is in
@@ -39,7 +40,7 @@ was manually reconnected before the test.
   ┌────────────┐  GET /state      ┌──────────────────────────┐
   │   Phone A  │◀────────────────▶│  Linux host:             │
   │  SIM +     │  POST /answer    │  telephone-agent         │
-  │  helper    │  POST /hangup    │  inbound watcher         │
+  │  helper    │  POST /hangup    │  daemon (inbound watcher)│
   └─────┬──────┘                  │  Grok Voice session      │
         │                         └────────────┬─────────────┘
         │                                      │
@@ -77,14 +78,17 @@ not-actionable and keeps polling. `202 answering` means Telecom accepted the
 request; it does not prove that the call is connected. The subsequent `/state`
 normally reports `offhook`.
 
-A ringing or active call blocks `POST /call`, so inbound and outbound calls are
-mutually exclusive on the same phone. Do not run the outbound timer or a
-scheduled `run` while the inbound watcher is enabled.
+A ringing or active call blocks `POST /call`, so only one call can be active on the
+phone. The daemon serializes this: its inbound watcher and the `run` client share one
+executor, and a client request during an active call is rejected as busy. The outbound
+timer can therefore stay enabled alongside inbound answering. If an inbound call is
+active at the slot, that outbound request is skipped rather than overlapping; the
+helper independently rejects `/call` with `409` while a call is ringing or active.
 
 ## Prerequisites
 
-- `realtime.kind = "grok"`. The inbound command refuses to start with the text
-  pipeline, which has no inbound audio path.
+- `realtime.kind = "grok"`. The daemon and the `inbound` debug command refuse to
+  start with the text pipeline, which has no inbound audio path.
 - The helper provisioned with `ANSWER_PHONE_CALLS` and a valid bearer token. See
   [Dial helper](dial-helper.md) and [Android setup](android-setup.md).
 - An audio path that exists only while the call is active: Bluetooth HFP with
@@ -121,6 +125,16 @@ so with Bluetooth it fires after the SCO nodes appear. See
 
 ## Running the watcher
 
+The deployment runs the watcher inside the long-lived daemon, which also serves
+outbound calls from `run`:
+
+```bash
+telephone-agent --config config/config.toml daemon
+```
+
+For inbound-only foreground debugging, run the watcher directly. This command must not
+run while the daemon or `serve` is active, because each opens the audio path:
+
 ```bash
 telephone-agent --config config/config.toml inbound
 telephone-agent --config config/config.toml inbound --once
@@ -148,9 +162,10 @@ hang up.
 
 ## systemd user unit
 
-`scripts/systemd/telephone-agent-inbound.service` is a **user** unit. It must
-run as the same account that owns the PipeWire and WirePlumber session;
-otherwise it cannot see the Bluetooth SCO nodes. It uses the root `.venv`:
+`scripts/systemd/telephone-agent-daemon.service` is a **user** unit that runs the
+long-lived daemon. It must run as the same account that owns the PipeWire and
+WirePlumber session; otherwise it cannot see the Bluetooth SCO nodes. It uses the root
+`.venv`:
 
 ```ini
 [Service]
@@ -160,29 +175,34 @@ RestartSec=5
 WorkingDirectory=%h/android-telephone-agent
 EnvironmentFile=-%h/android-telephone-agent/.env
 ExecStart=%h/android-telephone-agent/.venv/bin/telephone-agent \
-  --config %h/android-telephone-agent/config/config.toml inbound
+  --config %h/android-telephone-agent/config/config.toml daemon
+TimeoutStopSec=30
 ```
 
 Install it and keep the user manager running on a headless host:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-install -m644 scripts/systemd/telephone-agent-inbound.service \
+install -m644 scripts/systemd/telephone-agent-daemon.service \
   ~/.config/systemd/user/
 sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
-systemctl --user enable --now telephone-agent-inbound.service
-journalctl --user -u telephone-agent-inbound.service -n 100 --no-pager
+systemctl --user enable --now telephone-agent-daemon.service
+journalctl --user -u telephone-agent-daemon.service -n 100 --no-pager
 ```
 
-The unit has `Restart=always` because the watcher is long-lived and does not
-place a call on startup. A crashed process re-arms safely: it polls rather than
-redialing. `TimeoutStopSec=30` gives the active session time to close; SIGTERM
-sets the stop event and the session asks the helper to hang up.
+The unit has `Restart=always` because the daemon is long-lived and serves calls rather
+than dialing on startup. A crashed process re-arms safely: it listens for outbound
+requests and polls for inbound calls. `TimeoutStopSec=30` gives the active session time
+to close; SIGTERM sets the stop event and the session asks the helper to hang up.
 
-Do not enable this unit together with an outbound dialing unit/timer for the
-same phone. Inbound and outbound calls are mutually exclusive, and the helper
-rejects `/call` while a call is ringing or active.
+The daemon runs this watcher in the same process as the outbound control socket, so the
+outbound timer in [Bluetooth HFP](bluetooth-hfp.md#10-run-in-the-pipewire-user-session)
+can stay enabled. Calls are serialized on the one phone call slot: if a call is already
+ringing or active, the helper rejects `/call` with `409`, and a `run` client request is
+rejected as busy. A scheduled slot that overlaps an active inbound call is skipped, not
+run concurrently. `inbound` remains a foreground debug command, not a deployment unit;
+stop the daemon before running it.
 
 ## Audio: Bluetooth carries audio only
 
@@ -240,12 +260,12 @@ on-device and apply a retention policy.
 
 | Symptom | Check |
 |---|---|
-| `inbound requires realtime.kind = 'grok'` | Set `[realtime].kind = "grok"`; the text pipeline has no inbound path. |
+| `daemon requires realtime.kind = 'grok'` or `inbound requires realtime.kind = 'grok'` | Set `[realtime].kind = "grok"`; the text pipeline has no inbound path. |
 | `/state` stays `unknown` | Android denied the call-state query. Check the helper's log and phone permission/role state. |
 | `/answer` returns 409 | The call stopped ringing or was answered manually. This is not retried; the watcher keeps polling. |
 | `/answer` returns 403 | Grant `ANSWER_PHONE_CALLS`; some vendors restrict non-dialer answering. |
 | `/answer` returns 500 | Android rejected the answer attempt; check the helper's log and locked-screen state. |
 | Call is answered but the agent is silent | With Bluetooth, confirm the SCO nodes appeared and the phone routes call audio to the host. Run `doctor` during the call. |
 | Second call is not answered | The watcher waits for `idle` after a session. If `/hangup` failed and the phone remains `offhook`, end the call on the phone. |
-| Unit cannot find PipeWire | Run it as a user unit in the PipeWire user's session and enable lingering. |
-| Outbound call returns 409 | A call is ringing or active. Inbound and outbound are mutually exclusive. |
+| Daemon cannot find PipeWire | Run it as a user unit in the PipeWire user's session and enable lingering. |
+| Outbound call returns 409 or is rejected as busy | A call is ringing or active. The daemon serializes inbound and outbound calls; wait for `idle` or skip the slot. |

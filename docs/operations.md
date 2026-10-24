@@ -8,9 +8,9 @@ device.
 
 Related: [Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md),
 [Inbound calls](./inbound.md), the
-[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), the
-[Bluetooth timer](../scripts/systemd/telephone-agent-bluetooth.timer), and the
-[inbound user service](../scripts/systemd/telephone-agent-inbound.service).
+[daemon user service](../scripts/systemd/telephone-agent-daemon.service), the
+[outbound client service](../scripts/systemd/telephone-agent-bluetooth.service), and the
+[Bluetooth timer](../scripts/systemd/telephone-agent-bluetooth.timer).
 
 ## 1. Operating model
 
@@ -26,10 +26,17 @@ Related: [Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md
 
 The host is the phone's Bluetooth headset, not a modem. The agent plays audio to the SCO
 sink, which Phone A treats as headset microphone input, and captures the SCO source, which
-is what Phone A would send to the headset earpiece. The runtime is a `Type=oneshot` systemd
-**user** service triggered by a user timer. Do not add `Restart=always`: restarting a unit
-that dials would redial. The inbound watcher is the exception; it is long-lived, polls
-instead of dialing, and uses `Restart=always`.
+is what Phone A would send to the headset earpiece. The runtime is one long-lived systemd
+**user** service, `telephone-agent-daemon.service`. It owns the audio path, serves
+outbound calls from `run` over a local Unix socket, and runs the inbound watcher in the
+same process. A user timer triggers a `Type=oneshot` client service,
+`telephone-agent-bluetooth.service`, that submits one call to the daemon and waits. Do not
+add `Restart=always` to the client: restarting it would submit another call. The daemon
+itself uses `Restart=always` and re-arms safely because it serves calls rather than dialing
+at startup. The daemon requires `[realtime].kind = "grok"` because it always runs the
+inbound watcher; the text pipeline has no inbound audio path. `serve` (MCP/A2A) is a
+separate control plane that also owns the audio path; do not run it at the same time as
+the daemon.
 
 The agent must run in the same user session as PipeWire and WirePlumber. A system service
 running as another user has a different session bus and `XDG_RUNTIME_DIR` and cannot see
@@ -71,7 +78,8 @@ export PROVIDER_HEALTH_URL="https://api.example.com/health"  # replace
 | Bluetooth adapter and phone | `./scripts/bluetooth-check.sh --idle "$BT_ADDRESS"` | exit 0 | Hard |
 | SCO nodes during a call | `./scripts/bluetooth-check.sh "$BT_ADDRESS"` | exit 0 | Hard |
 | Phone reachable | `curl -fsS --max-time 3 "http://$PHONE_HOST:8765/health"` | HTTP 200 | Hard |
-| Inbound watcher active | `systemctl --user is-active telephone-agent-inbound.service` | `active` when inbound is enabled | Hard |
+| Daemon active | `systemctl --user is-active telephone-agent-daemon.service` | `active` | Hard |
+| Outbound timer active | `systemctl --user is-active telephone-agent-bluetooth.timer` | `active` when scheduled calls are enabled | Warn |
 | Time synchronized | `timedatectl show -p NTPSynchronized --value` | `yes` | Hard |
 | Time zone | `timedatectl show -p Timezone --value` | `Asia/Kolkata` | Hard |
 | Provider reachable | `curl -fsS --max-time 4 -o /dev/null -w '%{http_code}\n' "$PROVIDER_HEALTH_URL"` | 2xx | Hard |
@@ -104,11 +112,13 @@ Set the system time zone to `Asia/Kolkata` and also state the zone in the timer.
 with `systemd-analyze calendar '*-*-* 08:00:00 Asia/Kolkata'` before enabling it.
 
 The shipped units are
+[telephone-agent-daemon.service](../scripts/systemd/telephone-agent-daemon.service), the
+long-lived daemon that owns calls and audio,
 [telephone-agent-bluetooth.service](../scripts/systemd/telephone-agent-bluetooth.service),
-a `Type=oneshot` user unit that places one call and exits, and
+a `Type=oneshot` client that submits one call to the daemon and waits, and
 [telephone-agent-bluetooth.timer](../scripts/systemd/telephone-agent-bluetooth.timer),
-which triggers it. Scheduling stays outside the runtime. Claim the slot before dialing so
-a timer retry cannot place a duplicate call.
+which triggers the client. Scheduling stays outside the runtime. Claim the slot before
+dialing so a timer retry cannot place a duplicate call.
 
 ```ini
 # ~/.config/systemd/user/telephone-agent-bluetooth.timer (shipped example)
@@ -140,9 +150,12 @@ If the host, network, or phone was unavailable, do not call when service returns
 the window. Record `missed_slot` and alert. Quiet hours, for example 21:00 to 07:00 local,
 override any catch-up logic.
 
-**Inbound versus outbound.** The inbound watcher and the outbound timer both use the one
-call slot. Do not enable both for the same phone. The helper rejects `/call` while a call
-is ringing or active, and the watcher waits for `idle` before re-arming.
+**Inbound and outbound.** The daemon serializes inbound and outbound calls on the one
+phone call slot, so the outbound timer can stay enabled alongside inbound answering. If a
+call is ringing or active at the slot, the helper rejects `/call` with `409` and the `run`
+client request is rejected as busy; record the slot as skipped instead of retrying into
+the active call. Do not start `serve` or `run --direct` while the daemon is active,
+because each would open a second audio owner.
 
 ## 5. Alerting
 
@@ -156,7 +169,7 @@ repository. Send a test alert at installation and after credential rotation.
 | Answered call under 20 seconds | Page |
 | One-way audio heuristic | Page |
 | Bluetooth adapter missing, phone disconnected > 5 minutes in the call window, or SCO nodes missing during a call | Page |
-| Inbound watcher inactive when inbound is enabled | Page |
+| Daemon inactive when calls are expected | Page |
 | Provider authentication or 5xx error at T-60 | Page |
 | SIM out of credit or no cellular signal | Page |
 | Two consecutive skipped or failed calls | Page |
@@ -273,7 +286,7 @@ Run at installation, quarterly, and after suspected exposure.
 | Firewall | `sudo ufw status verbose` or `sudo nft list ruleset` | Inbound denied except admin SSH |
 | LAN only | Query helper from outside the LAN | No response; no port forward |
 | Token permissions | `stat -c '%a %U:%G' <env-file>` | `600` or `640`, owner-only |
-| User services | `systemctl --user list-unit-files \| grep telephone` | Only the intended timer or inbound watcher enabled |
+| User services | `systemctl --user list-unit-files \| grep telephone` | Only the intended daemon, outbound client, and timer enabled |
 
 Rotate the token with `openssl rand -hex 32`, update the phone app and host environment,
 restart both, and confirm the old token is rejected. Rotate immediately if a laptop or
@@ -291,8 +304,8 @@ LAN; use a separate VLAN or TLS on a shared network.
 | Charging cable and port | Inspect for fraying, lint, bent pins | Clean, firm, no play |
 | Bluetooth link | `./scripts/bluetooth-check.sh --idle "$BT_ADDRESS"` | Both roles and phone connected |
 | Dust | Compressed air around host vents and phone port | Vents clear |
-| Logs | `journalctl --user -u telephone-agent-bluetooth.service -b --no-pager \| grep -iE 'error\|warn'` | No recurring errors |
-| Inbound service | `systemctl --user status telephone-agent-inbound.service` | Active when inbound is enabled |
+| Logs | `journalctl --user -u telephone-agent-daemon.service -b --no-pager \| grep -iE 'error\|warn'` | No recurring errors |
+| Daemon service | `systemctl --user status telephone-agent-daemon.service` | Active |
 | Disk | `df -h /`, `df -i /` | Below 80% |
 | Provider balance | Provider console | Credit and expiry adequate |
 | Test call | Documented test path | Two-way audio, clean hangup |
@@ -333,9 +346,9 @@ BlueZ, PipeWire, and WirePlumber versions.
 tar -C "$HOME" -czf "$HOME/telephone-agent-config-$(date +%F).tar.gz" \
   android-telephone-agent/config/config.toml \
   android-telephone-agent/.env \
+  .config/systemd/user/telephone-agent-daemon.service \
   .config/systemd/user/telephone-agent-bluetooth.service \
   .config/systemd/user/telephone-agent-bluetooth.timer \
-  .config/systemd/user/telephone-agent-inbound.service \
   .config/wireplumber/wireplumber.conf.d/51-bt-headset.conf
 ```
 
@@ -347,8 +360,8 @@ Spares: one phone charger and USB-C cable, and a second phone if the agent SIM c
 quickly. A spare host is optional but reduces recovery time.
 
 Recovery: restore the configuration and token; install BlueZ, PipeWire, and WirePlumber;
-install the WirePlumber fragment; pair and trust the phone; enable the user timer or the
-inbound watcher; wait for time sync; run the idle Bluetooth check, then place a supervised
+install the WirePlumber fragment; pair and trust the phone; enable the daemon and the
+outbound timer; wait for time sync; run the idle Bluetooth check, then place a supervised
 test call with two-way audio. Record the date and cause.
 
 ## Related documents
@@ -356,6 +369,6 @@ test call with two-way audio. Record the date and cause.
 [Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md),
 [Inbound calls](./inbound.md), [runbook](./runbook.md),
 [troubleshooting](./troubleshooting.md), the
-[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), the
-[Bluetooth timer](../scripts/systemd/telephone-agent-bluetooth.timer), and the
-[inbound user service](../scripts/systemd/telephone-agent-inbound.service).
+[daemon user service](../scripts/systemd/telephone-agent-daemon.service), the
+[outbound client service](../scripts/systemd/telephone-agent-bluetooth.service), and the
+[Bluetooth timer](../scripts/systemd/telephone-agent-bluetooth.timer).

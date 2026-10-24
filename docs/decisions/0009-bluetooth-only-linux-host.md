@@ -40,8 +40,8 @@ HFP.
   pipeline rate.
 - Dialing, answering, and hangup go through the LAN helper app on Phone A. HFP AT call
   control is not implemented.
-- Outbound and inbound work run as systemd **user** units so they share the PipeWire and
-  WirePlumber session. Lingering is required on a headless host.
+- Inbound and outbound work runs in a systemd **user** service so it shares the PipeWire
+  and WirePlumber session. Lingering is required on a headless host.
 - The Raspberry Pi and USB Audio Class gadget route is removed, together with its scripts,
   system units, hardware guide, bill of materials, and power/thermal documentation.
 

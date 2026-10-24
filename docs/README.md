@@ -29,7 +29,7 @@ than verified behavior. Device-specific claims are marked "verify on your device
 | [Design brief](design-brief.md) | Authoritative scope, constraints, topology, host requirements, agent pipeline, operations, and security. |
 | [Architecture](architecture.md) | How the parts fit together: process boundaries, data flow, call control, and failure handling. |
 | [Bluetooth HFP](bluetooth-hfp.md) | Primary host and audio guide: WirePlumber roles, pairing, SCO nodes, audio test, agent configuration, and user-session deployment. |
-| [Inbound calls](inbound.md) | Helper `/state` and `/answer`, the inbound watcher, auto-answer privacy limits, systemd user unit, and inbound transcripts. |
+| [Inbound calls](inbound.md) | Helper `/state` and `/answer`, the daemon's inbound watcher, auto-answer privacy limits, systemd user units, and inbound transcripts. |
 | [Android setup](android-setup.md) | Phone A configuration for unattended calls, SIM selection, Bluetooth HFP routing, and helper provisioning over the LAN. |
 | [Dial helper](dial-helper.md) | Reference helper app, its LAN API, bearer-token authentication, and call-control limits. |
 | [Voice agent](voice-agent.md) | SCO capture, voice activity detection, STT, LLM, TTS, playback, barge-in, and timeouts, plus the realtime speech-to-speech alternative. |

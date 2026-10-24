@@ -67,8 +67,9 @@ python -m pip install --upgrade pip
 pip install -e .
 ```
 
-The resulting console script is `agent/.venv/bin/telephone-agent`. The systemd
-example below uses that path. Development tools are optional:
+The resulting console script is `agent/.venv/bin/telephone-agent`. The shipped
+systemd units assume a virtual environment at the repository root (see below); adjust
+`ExecStart` if your console script is elsewhere. Development tools are optional:
 
 ```bash
 pip install -e ".[dev]"
@@ -260,8 +261,9 @@ telephone-agent --config ../config/config.toml run --number +15555550100
 By default this submits one outbound call to the long-lived `daemon` process over
 its local Unix socket and waits for the final result, printing the same
 `call ended: state=... reason=... turns=... duration=...` line as an in-process
-run. The daemon owns the audio path, so `run` and the daemon's inbound watcher
-cannot open a call at the same time. If no daemon is listening the command exits
+run. The daemon owns the audio path and serializes `run` requests with its
+inbound watcher, so two calls cannot open the audio link at the same time. If no
+daemon is listening the command exits
 with status 1 and tells you to start `telephone-agent-daemon.service` or use
 `--direct`; it does not silently fall back to a second audio owner.
 
@@ -296,7 +298,9 @@ socket. It refuses to start if another daemon is already listening.
 
 The control protocol is newline-delimited JSON with `call`, `status`, and
 `hangup` commands. It never carries the helper token or an API key, and status
-output masks the destination number.
+output masks the destination number. `serve` is a separate MCP/A2A control plane,
+not a companion process: it also opens the audio path, so do not run it at the
+same time as `daemon`.
 
 ### `inbound`
 
@@ -324,8 +328,9 @@ the watcher does not exit.
 There is **no caller ID** and no allowlist: the helper does not request
 `READ_CALL_LOG` and never returns a caller number. Every ringing call on the
 agent SIM is answered. Use a SIM dedicated to the agent and read
-[Inbound calls](../docs/inbound.md) before enabling it. Inbound and outbound
-calls are mutually exclusive on one phone.
+[Inbound calls](../docs/inbound.md) before enabling it. The daemon runs this
+watcher in-process and serializes inbound and outbound calls on the one phone
+call slot, so the outbound timer can remain enabled alongside it.
 
 ### `--help`
 
@@ -453,9 +458,9 @@ PCM is signed 16-bit little-endian, mono, at `audio.sample_rate` (16 kHz by
 default). The transcriber receives one endpointed utterance; the synthesizer
 returns the complete reply audio. Neither adapter may write audio to disk.
 
-Wire implementations in `telephone_agent/__main__.py::_build_session` for the
-one-shot `run` command and in `_build_session_factory` for `serve`, or call the
-library directly:
+Wire implementations in `telephone_agent/__main__.py` for the `run --direct`
+debug path, the daemon's outbound and inbound call paths, and `serve`, or call
+the library directly:
 
 ```python
 from telephone_agent.pipeline import CallSession
@@ -576,11 +581,19 @@ Caveats:
 
 ## systemd
 
-The one-shot `run` command places one call and exits, so use a systemd **user** timer
-rather than `Restart=always`. Restarting a command that dials would redial after every
-exit. The timer is the scheduler in v0; `agent.schedule` in the TOML file is reserved for
-a future scheduler and is not read. The `serve` command is the long-lived alternative and
-should run as a normal user service if you use the control plane instead of the timer.
+The deployment is one long-lived `daemon` user service. It owns the Bluetooth audio path
+and the phone, serves outbound calls from `run` over a local Unix socket, and runs the
+inbound watcher in the same process. `run` submits one call and waits for the result.
+`inbound` and `run --direct` are foreground debug commands that must not run while the
+daemon is active. `serve` is a separate MCP/A2A control plane that also owns the audio
+path; run `daemon` or `serve`, not both.
+
+The outbound timer is the scheduler in v0; `agent.schedule` in the TOML file is reserved
+for a future scheduler and is not read. Each timer activation starts a `Type=oneshot`
+client service that submits one call to the daemon and exits. Do not add
+`Restart=always` to that client: a restart would submit another call. The daemon itself
+uses `Restart=always` and re-arms safely because it serves calls rather than dialing at
+startup.
 
 PipeWire and WirePlumber run in the user session. A system service, even one that runs as
 the same account, has a different session bus and `XDG_RUNTIME_DIR` and cannot see the
@@ -588,40 +601,40 @@ SCO nodes. Run the agent as a systemd **user** service in the account that owns 
 PipeWire session.
 
 The repository ships user units in `scripts/systemd/`:
-`telephone-agent-bluetooth.service` and `telephone-agent-bluetooth.timer`. They assume the
-repository is at `~/android-telephone-agent` and use the `agent/.venv` console script;
-edit the `%h`-based paths (`WorkingDirectory`, `EnvironmentFile`, and `ExecStart`) if yours
-are elsewhere. Install them under the user unit directory and enable the timer:
+`telephone-agent-daemon.service`, `telephone-agent-bluetooth.service`, and
+`telephone-agent-bluetooth.timer`. They assume the repository is at
+`~/android-telephone-agent` and use the repository root `.venv` console script; edit the
+`%h`-based paths (`WorkingDirectory`, `EnvironmentFile`, and `ExecStart`) if yours are
+elsewhere. Install them under the user unit directory, then enable the daemon and the
+timer:
 
 ```bash
 mkdir -p ~/.config/systemd/user
+install -m644 scripts/systemd/telephone-agent-daemon.service \
+  ~/.config/systemd/user/
 install -m644 scripts/systemd/telephone-agent-bluetooth.service \
   ~/.config/systemd/user/
 install -m644 scripts/systemd/telephone-agent-bluetooth.timer \
   ~/.config/systemd/user/
 sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
+systemctl --user enable --now telephone-agent-daemon.service
 systemctl --user enable --now telephone-agent-bluetooth.timer
-journalctl --user -u telephone-agent-bluetooth.service -n 100 --no-pager
+journalctl --user -u telephone-agent-daemon.service -n 100 --no-pager
 ```
 
-Enable lingering on a headless host so the user manager and PipeWire keep
-running when no one is logged in. Do not enable two outbound timers for the
-same call slot. The full deployment steps are in
-[Bluetooth HFP](../docs/bluetooth-hfp.md), section 10.
-
-The inbound watcher has its own long-lived user unit,
-`scripts/systemd/telephone-agent-inbound.service`. It uses the root
-`.venv/bin/telephone-agent`, shares the user's PipeWire/WirePlumber session, and
-restarts on failure because it polls for calls instead of dialing at startup.
-Inbound and outbound calls are mutually exclusive: do not enable the inbound
-unit together with an outbound timer on the same phone. Installation and
-privacy limits are in [Inbound calls](../docs/inbound.md).
+Enable lingering on a headless host so the user manager and PipeWire keep running when no
+one is logged in. Do not enable two outbound timers for the same call slot. The timer can
+stay enabled alongside inbound answering: the daemon owns the single call slot and
+serializes calls. A scheduled request that arrives during an active call is rejected as
+busy and that slot is skipped; it does not start a second audio owner. Installation and
+privacy limits are in [Inbound calls](../docs/inbound.md). The full deployment steps are
+in [Bluetooth HFP](../docs/bluetooth-hfp.md), section 10.
 
 The design brief targets 24/7 operation with a host watchdog and optional volatile
-journald storage. Those are host-level settings; the one-shot user unit does not enable
-them. Do not add `Restart=always` until a scheduler guarantees one call per slot and
-idempotent retries.
+journald storage. Those are host-level settings; the units do not enable them. The
+daemon's `Restart=always` is safe because it serves calls rather than dialing at startup.
+Do not copy it to the outbound client.
 
 ## Testing
 
@@ -707,7 +720,7 @@ Start with the least invasive checks:
 ```bash
 telephone-agent --config ../config/config.toml doctor
 telephone-agent --config ../config/config.toml selftest
-journalctl --user -u telephone-agent-bluetooth.service -n 100 --no-pager
+journalctl --user -u telephone-agent-daemon.service -n 100 --no-pager
 ```
 
 | Symptom | Check |
@@ -753,7 +766,8 @@ agent/
   pyproject.toml          packaging, console script, ruff and pytest settings
   README.md               this file
   telephone_agent/
-    __main__.py           doctor, dial, run, inbound, serve, selftest
+    __main__.py           doctor, dial, run, inbound, daemon, serve, selftest
+    daemon.py             long-lived call engine and Unix-socket control server
     config.py             TOML loading, environment overrides, validation
     audio.py              pw-record/pw-play backend and Bluetooth SCO discovery
     vad.py                RMS, dBFS, energy endpointer

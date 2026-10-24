@@ -6,11 +6,11 @@ and verify device-specific behavior on your device.
 
 Related: [Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md),
 [Inbound calls](./inbound.md), [operations](./operations.md), [runbook](./runbook.md), the
-[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), and the
-[inbound user service](../scripts/systemd/telephone-agent-inbound.service).
+[daemon user service](../scripts/systemd/telephone-agent-daemon.service), and the
+[outbound client service](../scripts/systemd/telephone-agent-bluetooth.service).
 
 For inbound-answer failures, including `/answer` 403/409/500, ringing with no SCO nodes,
-and the inbound service not starting, see the table in
+and the daemon not starting, see the table in
 [Inbound calls](./inbound.md#limits-and-troubleshooting) and the inbound rows in
 [Bluetooth HFP](./bluetooth-hfp.md#11-troubleshooting).
 
@@ -178,9 +178,9 @@ out="${HOME}/telephone-agent-diag-$(date +%Y%m%d-%H%M%S).txt"
   echo "== hfp =="; ./scripts/bluetooth-check.sh --idle "${BT_ADDRESS}" 2>&1
   echo "== sco =="; pw-dump 2>&1 | grep -E 'bluez_(input|output)\.|api\.bluez5\.sco' | head -n 40
   echo "== pipewire =="; systemctl --user status pipewire wireplumber --no-pager
-  echo "== agent =="; systemctl --user status telephone-agent-bluetooth.service --no-pager
-  echo "== agent log =="; journalctl --user -u telephone-agent-bluetooth.service -n 300 --no-pager
-  echo "== inbound =="; systemctl --user status telephone-agent-inbound.service --no-pager
+  echo "== agent =="; systemctl --user status telephone-agent-daemon.service --no-pager
+  echo "== agent log =="; journalctl --user -u telephone-agent-daemon.service -n 300 --no-pager
+  echo "== outbound client =="; systemctl --user status telephone-agent-bluetooth.service --no-pager
   echo "== timers =="; systemctl --user list-timers --all --no-pager
   echo "== ports =="; sudo ss -tlnp
 } >"$out" 2>&1
@@ -196,5 +196,5 @@ whether the failure happens on every call or only some calls. If adb is availabl
 [Operations](./operations.md), [runbook](./runbook.md),
 [Bluetooth HFP](./bluetooth-hfp.md), [Inbound calls](./inbound.md),
 [Android setup](./android-setup.md), the
-[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service), and the
-[inbound user service](../scripts/systemd/telephone-agent-inbound.service).
+[daemon user service](../scripts/systemd/telephone-agent-daemon.service), and the
+[outbound client service](../scripts/systemd/telephone-agent-bluetooth.service).

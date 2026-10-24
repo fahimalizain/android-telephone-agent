@@ -5,6 +5,10 @@ Description=Daily Bluetooth HFP telephone agent call
 # Call time in the local system time zone. Edit this for your schedule.
 OnCalendar=*-*-* 09:00:00 Asia/Kolkata
 AccuracySec=1s
+# The timer triggers a one-shot client that submits one call to the daemon.
+# It can stay enabled alongside inbound answering: the daemon owns the single
+# call slot and serializes calls. A slot that overlaps an active call is
+# rejected as busy and skipped.
 # Match the operations policy: do not catch up on missed slots after a reboot
 # or power cut. A late call is worse than a skipped one.
 Persistent=false

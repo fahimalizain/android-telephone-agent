@@ -27,13 +27,15 @@ the only supported audio transport; see the [Bluetooth HFP guide](docs/bluetooth
 and [ADR 0009](docs/decisions/0009-bluetooth-only-linux-host.md).
 
 An opt-in inbound mode can also answer calls to the agent SIM and connect them to the
-Grok Voice realtime adapter. It has been validated once on a live inbound PSTN call over
-Bluetooth HFP; see [Inbound calls](docs/inbound.md).
+Grok Voice realtime adapter. One long-lived daemon serves inbound and outbound calls, and
+inbound has been validated once on a live inbound PSTN call over Bluetooth HFP; see
+[Inbound calls](docs/inbound.md).
 
 Other agents can delegate calls to the runtime over MCP and A2A; one process serves both
-endpoints from a single call queue. The control plane uses one shared admin-level bearer
-token and does not yet enforce a destination allowlist, per-requester budgets, or
-requester identity, so keep it on a trusted network. See the
+endpoints from a single call queue. `serve` is a separate control plane from the daemon.
+Both own the Bluetooth audio path, so do not run them at the same time. The control plane
+uses one shared admin-level bearer token and does not yet enforce a destination allowlist,
+per-requester budgets, or requester identity, so keep it on a trusted network. See the
 [interoperability guide](docs/interop.md).
 
 ## Quick start
@@ -82,18 +84,24 @@ The full setup is in the [Bluetooth HFP guide](docs/bluetooth-hfp.md) and
    With no call active, the SCO nodes are absent. That is expected; the check verifies the
    host tools, configuration, and helper reachability.
 
-5. **Place a call.**
+5. **Start the daemon and place a call.**
 
    ```bash
-   cd agent && ../.venv/bin/python -m telephone_agent \
-     --config ../config/config.toml run --number +91XXXXXXXXXX
+   .venv/bin/telephone-agent --config config/config.toml daemon
+   # in a second terminal
+   .venv/bin/telephone-agent --config config/config.toml run --number +91XXXXXXXXXX
    ```
 
-   Use `dial` for a one-shot call with no conversation loop, or `inbound` to wait for
-   incoming calls. See [Inbound calls](docs/inbound.md).
+   `run` submits the outbound call to the daemon and waits for the result. The same
+   daemon answers inbound calls. The daemon requires `[realtime].kind = "grok"`; use
+   `run --direct` for the text pipeline or other foreground debugging, or `dial` for a
+   one-shot call with no conversation loop. `inbound` remains a foreground debug command.
+   See [Inbound calls](docs/inbound.md).
 
-6. **Run it as a service.** Install the Bluetooth and inbound systemd *user* units from
-   `scripts/systemd/`. The agent must share the PipeWire/WirePlumber session; see the
+6. **Run it as a service.** Install the daemon and outbound client systemd *user* units
+   from `scripts/systemd/`. The daemon owns inbound and outbound calls; the timer triggers
+   a one-shot client that submits one call. The agent must share the
+   PipeWire/WirePlumber session; see the
    [Bluetooth guide](docs/bluetooth-hfp.md#10-run-in-the-pipewire-user-session).
 
 ## What this is not
@@ -151,9 +159,10 @@ and the host must run in the user session that owns PipeWire and WirePlumber.
 1. **Scheduled dial.** A scheduler on the host decides that a call slot is due and sends
    a request to a small helper app on Phone A over the LAN, authenticated with a bearer
    token. The helper places the call with `TelecomManager.placeCall()` on the agent SIM,
-   so Phone B rings with SIM A's number. The scheduler is the v0.1 milestone; `dial` and
-   `run` are the current entry points. Wireless `adb` is a development-only alternative
-   and is not suitable for unattended use.
+   so Phone B rings with SIM A's number. The scheduler is the v0.1 milestone. In v0 a
+   systemd timer triggers a client that submits `run` to the long-lived daemon; `dial`
+   remains a one-shot helper call. Wireless `adb` is a development-only alternative and
+   is not suitable for unattended use.
 2. **Bluetooth HFP audio.** The host advertises the HFP hands-free (HF) role; Phone A is
    the audio gateway (AG). Pair the phone, trust the host, and enable **Calls and audio**
    for it. During a call PipeWire creates a SCO source for the downlink and a SCO sink for
@@ -229,9 +238,9 @@ scripts/
   build-helper.sh
   install-helper.sh
   helper-smoke-test.sh
+  systemd/telephone-agent-daemon.service
   systemd/telephone-agent-bluetooth.service
   systemd/telephone-agent-bluetooth.timer
-  systemd/telephone-agent-inbound.service
 agent/
   pyproject.toml
   README.md
@@ -269,7 +278,7 @@ The map matches the layout described in section 14 of the design brief.
 | v0 | Manual dial and Bluetooth HFP SCO verification | Validated on a Linux laptop: helper dial, mSBC 16 kHz SCO, Grok conversation, agent-initiated hangup |
 | v0.1 | Scheduler, one call per slot, bounded retries, heartbeat and alerting | Planned |
 | v0.2 | Latency measurement; bundled STT/TTS adapters for the text pipeline | Planned; Grok supplies barge-in and endpointing |
-| v0.3 | Inbound calls | Implemented and unit-tested; validated on one live inbound PSTN call over Bluetooth HFP |
+| v0.3 | Inbound calls and unified daemon | Implemented; one long-lived daemon serves inbound and outbound calls, and inbound was validated on one live inbound PSTN call over Bluetooth HFP |
 
 ### Validation
 

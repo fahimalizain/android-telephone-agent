@@ -110,12 +110,14 @@ scope. See [operations](./operations.md).
 
 ## Can it answer inbound calls?
 
-Yes, as an opt-in mode. `telephone-agent inbound`, or the
-`telephone-agent-inbound.service` user unit, polls the helper's `GET /state`, calls
-`POST /answer` on a ringing call, and runs one Grok Voice realtime session. The daemon is
-unit-tested, and one live inbound PSTN call was validated on 2026-10-24: the helper
-answered after the watcher's 1 s delay, the session ran four turns in 39.0 s, and a
-model-requested hangup returned the phone to idle.
+Yes, as an opt-in mode. The `telephone-agent-daemon.service` user unit runs the
+long-lived daemon, whose inbound watcher polls the helper's `GET /state`, calls
+`POST /answer` on a ringing call, and runs one Grok Voice realtime session. The `inbound`
+command is the same watcher as a foreground debug command, not a deployment unit. The
+daemon also serves outbound `run` requests and serializes them with inbound calls, so the
+outbound timer can stay enabled. One live inbound PSTN call was validated on 2026-10-24:
+the helper answered after the watcher's 1 s delay, the session ran four turns in 39.0 s,
+and a model-requested hangup returned the phone to idle.
 
 It answers **every** ringing call on the agent SIM. There is no caller-ID filter, allowlist,
 or screening because the helper does not request `READ_CALL_LOG`. `acceptRingingCall()` is
@@ -166,5 +168,6 @@ skipped rather than placed late. Test the new slot with a supervised call. See
 [Design brief](./design-brief.md), [Bluetooth HFP](./bluetooth-hfp.md),
 [Android setup](./android-setup.md), [Inbound calls](./inbound.md),
 [operations](./operations.md), [runbook](./runbook.md),
-[troubleshooting](./troubleshooting.md), and the
-[Bluetooth user service](../scripts/systemd/telephone-agent-bluetooth.service).
+[troubleshooting](./troubleshooting.md), the
+[daemon user service](../scripts/systemd/telephone-agent-daemon.service), and the
+[outbound client service](../scripts/systemd/telephone-agent-bluetooth.service).

@@ -10,9 +10,9 @@ checkout unless a path says otherwise. The primary setup guide is
 | `bluetooth-check.sh` | Check HFP adapter roles, phone state, and active-call SCO nodes. | `./bluetooth-check.sh [--idle] <MAC>` |
 | `bluetooth-audio-test.sh` | List, record, play, or inject a tone on the active-call SCO nodes. | `./bluetooth-audio-test.sh list` |
 | `dial.sh` | Place a call through the Phone A helper, or check its health. | `./dial.sh +91XXXXXXXXXX` / `./dial.sh --health` |
-| `systemd/telephone-agent-bluetooth.service` | One outbound call for the Bluetooth backend, as a systemd **user** unit so it shares PipeWire. | Copy to `~/.config/systemd/user/`; see `docs/bluetooth-hfp.md`. |
-| `systemd/telephone-agent-bluetooth.timer` | Daily call schedule for the Bluetooth user unit. | Copy to `~/.config/systemd/user/`, edit `OnCalendar`, then `systemctl --user enable --now telephone-agent-bluetooth.timer`. |
-| `systemd/telephone-agent-inbound.service` | Long-lived inbound call watcher for the Bluetooth backend, as a systemd **user** unit sharing the user's PipeWire session. Uses the repository root `.venv`. | Copy to `~/.config/systemd/user/`, then `systemctl --user enable --now telephone-agent-inbound.service`; see `docs/inbound.md`. |
+| `systemd/telephone-agent-daemon.service` | Long-lived daemon that owns the Bluetooth audio path and serves inbound and outbound calls, as a systemd **user** unit so it shares PipeWire. Uses the repository root `.venv`. | Copy to `~/.config/systemd/user/`, then `systemctl --user enable --now telephone-agent-daemon.service`; see `docs/bluetooth-hfp.md`. |
+| `systemd/telephone-agent-bluetooth.service` | One-shot outbound **client**: submits one call to the daemon with `run` and waits, as a systemd **user** unit. | Copy to `~/.config/systemd/user/`; normally triggered by the timer or `systemctl --user start telephone-agent-bluetooth.service`. |
+| `systemd/telephone-agent-bluetooth.timer` | Daily call schedule that triggers the outbound client. | Copy to `~/.config/systemd/user/`, edit `OnCalendar`, then `systemctl --user enable --now telephone-agent-bluetooth.timer`. |
 
 Bluetooth HFP is the only supported audio transport. The host joins Phone A as the
 Hands-Free (HF) role while Phone A is the Audio Gateway (AG). This was validated with
@@ -104,16 +104,19 @@ make bluetooth-audio-test BT_AUDIO_TEST_ARGS="record 10"
 ## systemd user services
 
 The Bluetooth backend must run in the same user session as PipeWire and WirePlumber. The
-`systemd/telephone-agent-bluetooth.service` and
-`systemd/telephone-agent-bluetooth.timer` files are user-unit examples. Copy them to
-`~/.config/systemd/user/`, edit the repository paths and `OnCalendar`, then enable the
-timer:
+repository ships three user-unit examples: the daemon, the one-shot outbound client, and
+the timer that triggers it. The daemon owns the audio path and serves inbound and outbound
+calls. The client runs `run`, which submits one call to the daemon and waits for the result.
+Copy the units to `~/.config/systemd/user/`, edit the repository paths and `OnCalendar`,
+then enable the daemon and the timer:
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp scripts/systemd/telephone-agent-bluetooth.service ~/.config/systemd/user/
-cp scripts/systemd/telephone-agent-bluetooth.timer ~/.config/systemd/user/
+install -m644 scripts/systemd/telephone-agent-daemon.service ~/.config/systemd/user/
+install -m644 scripts/systemd/telephone-agent-bluetooth.service ~/.config/systemd/user/
+install -m644 scripts/systemd/telephone-agent-bluetooth.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
+systemctl --user enable --now telephone-agent-daemon.service
 systemctl --user enable --now telephone-agent-bluetooth.timer
 ```
 
@@ -125,31 +128,24 @@ sudo loginctl enable-linger "$USER"
 systemctl --user enable --now pipewire wireplumber
 ```
 
-The Bluetooth unit is the only outbound scheduler. Do not enable it together with the
-inbound watcher for the same phone and call slot.
+The daemon serializes inbound and outbound calls on the one phone call slot, so the timer
+can stay enabled alongside inbound answering. If a call is already ringing or active at
+the slot, the helper rejects `/call` with `409` and the client request is rejected as busy;
+the outbound slot is skipped rather than run concurrently. Do not run `serve` (MCP/A2A) or
+`run --direct` while the daemon is active, because each would open a second audio owner.
 
-### Inbound watcher user service
+### Daemon and outbound client
 
-`systemd/telephone-agent-inbound.service` runs the long-lived `inbound` command for the
-Bluetooth backend. It is also a systemd **user** unit, so it shares the user's
-PipeWire/WirePlumber session and can see the SCO nodes after a call is answered. It uses
-the repository root `.venv/bin/telephone-agent`, while the Bluetooth outbound unit uses
-the `agent/.venv` path. Make sure the unit you install points at a virtual environment
-that exists on your host.
+`systemd/telephone-agent-daemon.service` runs the long-lived `daemon` command. It listens
+on the local Unix socket for `run` requests, runs the inbound watcher in the same process,
+and uses `Restart=always` because it serves calls rather than dialing on startup. It uses
+the repository root `.venv/bin/telephone-agent`.
 
-```sh
-mkdir -p ~/.config/systemd/user
-install -m644 scripts/systemd/telephone-agent-inbound.service \
-  ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now telephone-agent-inbound.service
-journalctl --user -u telephone-agent-inbound.service -n 100 --no-pager
-```
-
-Enable lingering as above on a headless host. Inbound and outbound calls are mutually
-exclusive on one phone: do not enable this unit together with the Bluetooth timer or a
-`run` timer. The watcher answers every ringing call on the agent SIM, with no caller ID.
-Read `docs/inbound.md` before enabling it.
+`systemd/telephone-agent-bluetooth.service` is a `Type=oneshot` client, not the audio
+owner. Each activation submits exactly one outbound call to the daemon and exits; it must
+not restart automatically. `systemd/telephone-agent-bluetooth.timer` triggers it. Because
+the daemon answers every ringing call on the agent SIM with no caller ID, read
+`docs/inbound.md` before enabling it.
 
 ## Notes
 
@@ -161,11 +157,12 @@ Read `docs/inbound.md` before enabling it.
   `TELEPHONE_AGENT_CONFIG`. The URL is the helper's base URL; the script posts to
   `/call` and checks `/health`. The double-underscore runtime spellings
   `TELEPHONE_AGENT_DIALER__URL` and `TELEPHONE_AGENT_DIALER__TOKEN` are also read.
-- The outbound user unit assumes the repository is at `~/android-telephone-agent` and
-  uses `agent/.venv`. The inbound unit uses the repository root `.venv`. Edit the
-  `%h`-based paths and the console-script path if your layout differs.
-- The shipped Bluetooth service passes `--config ~/android-telephone-agent/config/config.toml`.
-  Adjust the unit if your configuration lives elsewhere.
+- The user units assume the repository is at `~/android-telephone-agent` and use the
+  repository root `.venv`. Edit the `%h`-based paths and the console-script path if your
+  layout differs.
+- The shipped daemon and outbound client pass
+  `--config ~/android-telephone-agent/config/config.toml`. Adjust the units if your
+  configuration lives elsewhere.
 - `RuntimeWatchdogSec=15` belongs in `/etc/systemd/system.conf`, not in a user service
   unit, and is optional on a desktop.
 
