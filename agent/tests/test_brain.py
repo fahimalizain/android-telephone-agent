@@ -8,12 +8,17 @@ import urllib.error
 import urllib.request
 
 import pytest
+from telephone_agent.actions import BrainActionAdapter, Consult, HangUp, Speak
 from telephone_agent.brain import (
+    DEFAULT_ACTION_SYSTEM_PROMPT,
     DEFAULT_SYSTEM_PROMPT,
     BrainError,
     EchoBrain,
     HttpBrain,
+    HttpDeliberativeBrain,
+    _parse_action,
     build_brain,
+    build_deliberative_brain,
 )
 from telephone_agent.config import BrainConfig
 
@@ -285,3 +290,256 @@ def test_http_brain_validation() -> None:
         HttpBrain(base_url="http://127.0.0.1:11434/v1", model="local", max_tokens=0)
     with pytest.raises(ValueError, match="timeout_s"):
         HttpBrain(base_url="http://127.0.0.1:11434/v1", model="local", timeout_s=0)
+
+
+def test_parse_action_accepts_raw_speak_json() -> None:
+    assert _parse_action('{"action": "speak", "text": "Hello there."}') == Speak("Hello there.")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '```\n{"action": "speak", "text": "Fenced."}\n```',
+        '```json\n{"action": "speak", "text": "Fenced."}\n```',
+    ],
+)
+def test_parse_action_accepts_fenced_json(content: str) -> None:
+    assert _parse_action(content) == Speak("Fenced.")
+
+
+def test_parse_action_accepts_json_surrounded_by_prose() -> None:
+    content = 'Here is my choice: {"action": "speak", "text": "Sure."} Thanks.'
+    assert _parse_action(content) == Speak("Sure.")
+
+
+def test_parse_action_falls_back_to_plain_text() -> None:
+    assert _parse_action("  A plain spoken reply.  ") == Speak("A plain spoken reply.")
+
+
+def test_parse_action_accepts_consult_with_timeout() -> None:
+    action = _parse_action('{"action": "consult", "question": "Which booking?", "timeout_s": 4.5}')
+    assert action == Consult(question="Which booking?", timeout_s=4.5)
+
+
+def test_parse_action_accepts_consult_without_timeout() -> None:
+    action = _parse_action('{"action": "consult", "question": "Which booking?"}')
+    assert action == Consult(question="Which booking?")
+
+
+def test_parse_action_defaults_hangup_reason() -> None:
+    assert _parse_action('{"action": "hangup"}') == HangUp()
+
+
+def test_parse_action_accepts_hangup_reason() -> None:
+    assert _parse_action('{"action": "hangup", "reason": "caller_requested"}') == HangUp(
+        reason="caller_requested"
+    )
+
+
+def test_parse_action_rejects_unknown_action() -> None:
+    with pytest.raises(BrainError, match="unknown action"):
+        _parse_action('{"action": "sing"}')
+
+
+def test_parse_action_rejects_json_without_action() -> None:
+    with pytest.raises(BrainError, match="string 'action'"):
+        _parse_action('{"text": "Hello."}')
+
+
+@pytest.mark.parametrize(
+    "content, message",
+    [
+        ('{"action": "speak"}', "non-empty 'text'"),
+        ('{"action": "speak", "text": "   "}', "non-empty 'text'"),
+        ('{"action": "consult"}', "non-empty 'question'"),
+        ('{"action": "consult", "question": ""}', "non-empty 'question'"),
+    ],
+)
+def test_parse_action_rejects_empty_fields(content: str, message: str) -> None:
+    with pytest.raises(BrainError, match=message):
+        _parse_action(content)
+
+
+def test_parse_action_truncates_long_speech() -> None:
+    action = _parse_action(json.dumps({"action": "speak", "text": "x" * 1_200}))
+
+    assert isinstance(action, Speak)
+    assert len(action.text) == 1_000
+    assert action.text.endswith("...")
+
+
+def test_parse_action_rejects_long_question() -> None:
+    content = json.dumps({"action": "consult", "question": "q" * 501})
+
+    with pytest.raises(BrainError, match="500 characters"):
+        _parse_action(content)
+
+
+@pytest.mark.parametrize("timeout_s", [0, -1, "soon", True])
+def test_parse_action_rejects_invalid_consult_timeout(timeout_s: object) -> None:
+    content = json.dumps(
+        {"action": "consult", "question": "Which booking?", "timeout_s": timeout_s}
+    )
+
+    with pytest.raises(BrainError, match="timeout_s"):
+        _parse_action(content)
+
+
+def test_http_deliberative_decide_posts_json_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install(monkeypatch, [_completion('{"action":"speak","text":"Hello."}')])
+    brain = HttpDeliberativeBrain(
+        base_url="https://llm.example.invalid/v1/",
+        model="test-model",
+        api_key="test-key",
+        max_tokens=50,
+        timeout_s=9.0,
+    )
+
+    assert brain.decide("Hi") == Speak("Hello.")
+
+    request, timeout = calls[0]
+    assert request.full_url == "https://llm.example.invalid/v1/chat/completions"
+    assert request.get_method() == "POST"
+    assert _header(request, "Authorization") == "Bearer test-key"
+    assert _header(request, "Content-Type") == "application/json"
+    assert timeout == 9.0
+    payload = json.loads(request.data or b"{}")
+    assert payload["model"] == "test-model"
+    assert payload["max_tokens"] == 50
+    assert payload["stream"] is False
+    assert payload["messages"] == [
+        {"role": "system", "content": DEFAULT_ACTION_SYSTEM_PROMPT},
+        {"role": "user", "content": "Hi"},
+    ]
+
+
+def test_http_deliberative_keeps_history_across_decide_and_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_content = '{"action":"consult","question":"Which room?"}'
+    calls = _install(
+        monkeypatch,
+        [
+            _completion(first_content),
+            _completion('{"action":"speak","text":"Room four."}'),
+            _completion('{"action":"hangup","reason":"completed"}'),
+        ],
+    )
+    brain = HttpDeliberativeBrain(base_url="http://127.0.0.1:11434/v1", model="local")
+
+    assert brain.decide("Where is the meeting?") == Consult(question="Which room?")
+    assert brain.resume("Room four") == Speak("Room four.")
+
+    second = json.loads(calls[1][0].data or b"{}")
+    assert second["messages"] == [
+        {"role": "system", "content": DEFAULT_ACTION_SYSTEM_PROMPT},
+        {"role": "user", "content": "Where is the meeting?"},
+        {"role": "assistant", "content": first_content},
+        {"role": "user", "content": "The requester answered: Room four"},
+    ]
+
+    brain.reset()
+    assert brain.decide("Anything else?") == HangUp()
+
+    third = json.loads(calls[2][0].data or b"{}")
+    assert third["messages"] == [
+        {"role": "system", "content": DEFAULT_ACTION_SYSTEM_PROMPT},
+        {"role": "user", "content": "Anything else?"},
+    ]
+
+
+def test_http_deliberative_uses_configured_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install(monkeypatch, [_completion("A plain spoken reply.")])
+    brain = HttpDeliberativeBrain(
+        base_url="http://127.0.0.1:11434/v1",
+        model="local",
+        system_prompt="Use the custom action prompt.",
+    )
+
+    assert brain.decide("Hi") == Speak("A plain spoken reply.")
+
+    payload = json.loads(calls[0][0].data or b"{}")
+    assert payload["messages"][0] == {
+        "role": "system",
+        "content": "Use the custom action prompt.",
+    }
+
+
+def test_http_deliberative_consult_timeout_makes_no_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install(monkeypatch, [])
+    brain = HttpDeliberativeBrain(base_url="http://127.0.0.1:11434/v1", model="local")
+
+    assert brain.on_consult_timeout() == Speak(
+        "I'm sorry, I don't have that information right now."
+    )
+    assert calls == []
+
+
+def test_http_deliberative_rejects_empty_transcript() -> None:
+    brain = HttpDeliberativeBrain(base_url="http://127.0.0.1:11434/v1", model="local")
+
+    with pytest.raises(BrainError, match="empty transcript"):
+        brain.decide("  ")
+
+
+def test_http_deliberative_parse_failure_is_a_brain_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, [_completion('{"action":"dance"}')])
+    brain = HttpDeliberativeBrain(base_url="http://127.0.0.1:11434/v1", model="local")
+
+    with pytest.raises(BrainError, match="unknown action"):
+        brain.decide("Hi")
+
+
+def test_http_deliberative_does_not_repr_api_key() -> None:
+    brain = HttpDeliberativeBrain(
+        base_url="http://127.0.0.1:11434/v1",
+        model="local",
+        api_key="super-secret-key",
+    )
+
+    assert "super-secret-key" not in repr(brain)
+
+
+def test_http_deliberative_validation() -> None:
+    with pytest.raises(ValueError, match="base_url"):
+        HttpDeliberativeBrain(base_url="not-a-url", model="local")
+    with pytest.raises(ValueError, match="model"):
+        HttpDeliberativeBrain(base_url="http://127.0.0.1:11434/v1", model=" ")
+    with pytest.raises(ValueError, match="max_tokens"):
+        HttpDeliberativeBrain(
+            base_url="http://127.0.0.1:11434/v1",
+            model="local",
+            max_tokens=0,
+        )
+    with pytest.raises(ValueError, match="timeout_s"):
+        HttpDeliberativeBrain(
+            base_url="http://127.0.0.1:11434/v1",
+            model="local",
+            timeout_s=0,
+        )
+
+
+def test_build_deliberative_brain_text_mode() -> None:
+    brain = build_deliberative_brain(BrainConfig(kind="echo"))
+
+    assert isinstance(brain, BrainActionAdapter)
+    assert brain.decide("hello") == Speak("I heard: hello")
+
+
+def test_build_deliberative_brain_json_mode() -> None:
+    brain = build_deliberative_brain(
+        BrainConfig(
+            kind="http",
+            base_url="http://127.0.0.1:11434/v1",
+            model="local",
+            action_mode="json",
+        )
+    )
+
+    assert isinstance(brain, HttpDeliberativeBrain)
+    assert brain.base_url == "http://127.0.0.1:11434/v1"
+    assert brain.model == "local"

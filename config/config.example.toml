@@ -57,6 +57,10 @@ retries = 2
 # "http" targets any OpenAI-compatible /chat/completions endpoint.
 kind = "echo"
 
+# "text" for a plain reply brain; "json" for an HTTP brain that can consult the
+# requester mid-call. "json" requires kind = "http".
+# action_mode = "text"
+
 # The fields below are used only when kind = "http". Point base_url at the API
 # root, up to and including /v1. The client appends /chat/completions.
 base_url = "https://api.example.invalid/v1"

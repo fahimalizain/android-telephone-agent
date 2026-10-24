@@ -88,11 +88,16 @@ class DialerConfig:
 
 @dataclass(frozen=True, slots=True)
 class BrainConfig:
-    """Settings for the text-in, text-out conversation brain.
+    """Settings for the conversation brain.
 
     ``kind = "echo"`` is a loopback aid and ignores the HTTP fields.
     ``kind = "http"`` targets any OpenAI-compatible ``/chat/completions`` API.
     ``api_key`` may be empty for a local OpenAI-compatible server.
+
+    ``action_mode = "text"`` wraps a plain text-in, text-out brain in
+    ``BrainActionAdapter``. ``action_mode = "json"`` asks an HTTP model for one
+    JSON action per turn, which lets it consult the requester mid-call or hang
+    up; it requires ``kind = "http"``.
     """
 
     kind: str = "echo"
@@ -102,6 +107,7 @@ class BrainConfig:
     system_prompt: str = ""
     max_tokens: int = 200
     timeout_s: float = 30.0
+    action_mode: str = "text"
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +305,16 @@ def _validate_brain(brain: BrainConfig) -> None:
         raise ConfigError(f"brain.max_tokens must be > 0 (got {brain.max_tokens})")
     if not math.isfinite(brain.timeout_s) or brain.timeout_s <= 0:
         raise ConfigError(f"brain.timeout_s must be a positive number (got {brain.timeout_s})")
+    if brain.action_mode not in {"text", "json"}:
+        raise ConfigError(
+            f"brain.action_mode must be 'text' or 'json' (got {brain.action_mode!r}); "
+            "'text' wraps a plain reply brain and 'json' asks an HTTP model for actions"
+        )
+    if brain.action_mode == "json" and brain.kind != "http":
+        raise ConfigError(
+            "brain.action_mode = 'json' requires brain.kind = 'http'; the echo brain "
+            "cannot produce actions"
+        )
     if brain.kind == "http":
         if not brain.base_url:
             raise ConfigError(

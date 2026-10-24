@@ -1,4 +1,4 @@
-"""Text-in, text-out conversation brains.
+"""Conversation brains for text replies and deliberative call actions.
 
 The runtime keeps speech recognition and synthesis outside this module. A
 :class:`Brain` receives one caller transcript and returns one reply string; that
@@ -13,6 +13,12 @@ sentence-sized chunks to a streaming synthesizer while it keeps reading the
 microphone for barge-in. That adapter belongs beside this module and should
 implement :class:`Brain` for the simple path or a new streaming protocol for the
 incremental path.
+
+``HttpDeliberativeBrain`` implements the JSON action protocol from
+:mod:`telephone_agent.actions`. Each turn it asks an OpenAI-compatible model for
+one JSON object that selects ``speak``, ``consult``, or ``hangup``. If the model
+answers with plain prose instead, the prose is treated as speech so a chatty
+reply does not abort the call.
 """
 
 from __future__ import annotations
@@ -25,15 +31,19 @@ from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import urlsplit
 
+from .actions import Action, BrainActionAdapter, Consult, DeliberativeBrain, HangUp, Speak
 from .config import BrainConfig
 
 __all__ = [
+    "DEFAULT_ACTION_SYSTEM_PROMPT",
     "DEFAULT_SYSTEM_PROMPT",
     "Brain",
     "BrainError",
     "EchoBrain",
     "HttpBrain",
+    "HttpDeliberativeBrain",
     "build_brain",
+    "build_deliberative_brain",
 ]
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -42,9 +52,23 @@ DEFAULT_SYSTEM_PROMPT = (
     "stage directions."
 )
 
+DEFAULT_ACTION_SYSTEM_PROMPT = (
+    "You are a concise voice assistant on a telephone call. Choose exactly one "
+    "next action and reply with JSON only: one object, no markdown, no code "
+    'fences. Reply with one of {"action":"speak","text":"..."}, '
+    '{"action":"consult","question":"..."}, or '
+    '{"action":"hangup","reason":"..."}. '
+    "For speak, use one or two short spoken sentences in plain text, with no "
+    "lists or markdown. Consult only when a fact needed to proceed is genuinely "
+    "missing and the requester can supply it; do not consult for small talk. "
+    "Hang up when the objective is complete or the caller asks to end the call."
+)
+
 _USER_AGENT = "telephone-agent/0.1"
 _ECHO_MAX_CHARS = 200
 _MAX_ERROR_DETAIL = 500
+_MAX_SPEAK_CHARS = 1_000
+_MAX_QUESTION_CHARS = 500
 
 
 class BrainError(RuntimeError):
@@ -192,6 +216,78 @@ class HttpBrain:
         return body, status
 
 
+@dataclass(slots=True)
+class HttpDeliberativeBrain(HttpBrain):
+    """OpenAI-compatible brain that chooses a call action from JSON.
+
+    The model must answer with one JSON object containing an ``action`` field:
+    ``speak`` with ``text``, ``consult`` with ``question`` (and an optional
+    ``timeout_s``), or ``hangup`` with an optional ``reason``. Plain prose with
+    no JSON object is spoken as-is. Conversation history is kept for the call
+    and cleared by :meth:`reset`.
+    """
+
+    system_prompt: str = DEFAULT_ACTION_SYSTEM_PROMPT
+
+    def decide(self, transcript: str) -> Action:
+        """Return the action chosen for one caller transcript."""
+
+        text = transcript.strip()
+        if not text:
+            raise BrainError("cannot decide on an empty transcript")
+        return self._request_action(text)
+
+    def resume(self, answer: str) -> Action:
+        """Feed a consultation answer back to the model and return its action."""
+
+        return self._request_action(f"The requester answered: {answer}")
+
+    def on_consult_timeout(self) -> Action:
+        """Return a spoken fallback without contacting the model."""
+
+        return Speak("I'm sorry, I don't have that information right now.")
+
+    def _request_action(self, user_content: str) -> Action:
+        prompt = self.system_prompt.strip() or DEFAULT_ACTION_SYSTEM_PROMPT
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": prompt},
+            *self._history,
+            {"role": "user", "content": user_content},
+        ]
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+        }
+        body, status = self._post(payload)
+        content = _assistant_content(body, status)
+        self._history.append({"role": "user", "content": user_content})
+        action = _parse_action(content)
+        self._history.append({"role": "assistant", "content": content})
+        return action
+
+
+def build_deliberative_brain(config: BrainConfig) -> DeliberativeBrain:
+    """Construct the deliberative brain described by *config*.
+
+    ``action_mode = "json"`` builds an :class:`HttpDeliberativeBrain`; the
+    default ``"text"`` mode wraps :func:`build_brain` in
+    :class:`~telephone_agent.actions.BrainActionAdapter`.
+    """
+
+    if config.action_mode == "json":
+        return HttpDeliberativeBrain(
+            base_url=config.base_url,
+            model=config.model,
+            api_key=config.api_key,
+            system_prompt=config.system_prompt,
+            max_tokens=config.max_tokens,
+            timeout_s=config.timeout_s,
+        )
+    return BrainActionAdapter(build_brain(config))
+
+
 def build_brain(config: BrainConfig) -> Brain:
     """Construct the brain described by *config*.
 
@@ -211,6 +307,97 @@ def build_brain(config: BrainConfig) -> Brain:
             timeout_s=config.timeout_s,
         )
     raise BrainError(f"unsupported brain kind {config.kind!r}")
+
+
+def _parse_action(content: str) -> Action:
+    """Parse one assistant message into a call action.
+
+    A JSON object is accepted on its own, inside a Markdown code fence, or
+    surrounded by short prose. When no JSON object can be parsed, the whole
+    message is spoken so that a chatty model still produces a useful turn.
+    """
+
+    text = content.strip()
+    if not text:
+        raise BrainError("brain returned an empty response")
+
+    payload = _json_object(text)
+    if payload is None:
+        return Speak(text)
+
+    action = payload.get("action")
+    if not isinstance(action, str) or not action.strip():
+        raise BrainError("brain action JSON is missing a string 'action'")
+    name = action.strip()
+
+    if name == "speak":
+        value = payload.get("text")
+        if not isinstance(value, str) or not value.strip():
+            raise BrainError("brain speak action requires non-empty 'text'")
+        spoken = value.strip()
+        if len(spoken) > _MAX_SPEAK_CHARS:
+            spoken = f"{spoken[: _MAX_SPEAK_CHARS - 3]}..."
+        return Speak(spoken)
+
+    if name == "consult":
+        value = payload.get("question")
+        if not isinstance(value, str) or not value.strip():
+            raise BrainError("brain consult action requires non-empty 'question'")
+        question = value.strip()
+        if len(question) > _MAX_QUESTION_CHARS:
+            raise BrainError(f"brain consult question exceeds {_MAX_QUESTION_CHARS} characters")
+        raw_timeout = payload.get("timeout_s")
+        timeout_s: float | None = None
+        if raw_timeout is not None:
+            if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
+                raise BrainError("brain consult 'timeout_s' must be a number")
+            timeout_s = float(raw_timeout)
+            if not math.isfinite(timeout_s) or timeout_s <= 0:
+                raise BrainError("brain consult 'timeout_s' must be finite and greater than 0")
+        return Consult(question=question, timeout_s=timeout_s)
+
+    if name == "hangup":
+        reason = payload.get("reason", "completed")
+        if not isinstance(reason, str):
+            raise BrainError("brain hangup 'reason' must be a string")
+        reason = reason.strip()
+        if not reason:
+            raise BrainError("brain hangup 'reason' must not be empty")
+        return HangUp(reason=reason)
+
+    raise BrainError(f"brain returned unknown action {name[:50]!r}")
+
+
+def _json_object(text: str) -> dict[str, object] | None:
+    unfenced = _strip_fences(text)
+    candidates = [unfenced]
+    start = unfenced.find("{")
+    end = unfenced.rfind("}")
+    if start != -1 and end > start:
+        embedded = unfenced[start : end + 1]
+        if embedded != unfenced:
+            candidates.append(embedded)
+
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _strip_fences(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    body = stripped[3:]
+    if body[:4].lower() == "json":
+        body = body[4:]
+    if body.rstrip().endswith("```"):
+        body = body.rstrip()[:-3]
+    return body.strip()
 
 
 def _assistant_content(body: str, status: int) -> str:

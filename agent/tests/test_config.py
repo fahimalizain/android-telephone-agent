@@ -45,6 +45,7 @@ def test_load_applies_defaults(tmp_path: Path) -> None:
         token="test-token",
     )
     assert config.brain.kind == "echo"
+    assert config.brain.action_mode == "text"
     assert config.agent == AgentConfig()
     assert config.brain.max_tokens == 200
     assert config.agent.vad_threshold == -40.0
@@ -77,6 +78,7 @@ model = "test-model"
 system_prompt = "Be brief."
 max_tokens = 64
 timeout_s = 12.0
+action_mode = "json"
 
 [agent]
 schedule = "0 9 * * *"
@@ -98,6 +100,7 @@ language = "ml-IN"
     assert config.brain.kind == "http"
     assert config.brain.model == "test-model"
     assert config.brain.api_key == "test-key"
+    assert config.brain.action_mode == "json"
     assert config.agent.schedule == "0 9 * * *"
     assert config.agent.language == "ml-IN"
     assert config.agent.vad_threshold == -35.0
@@ -421,6 +424,8 @@ card = "Gadget"
         ),
         ("[brain]\nmax_tokens = 0", "brain.max_tokens"),
         ("[brain]\ntimeout_s = 0", "brain.timeout_s"),
+        ('[brain]\naction_mode = "xml"', "brain.action_mode"),
+        ('[brain]\naction_mode = "json"', "requires brain.kind = 'http'"),
     ],
 )
 def test_brain_validation(tmp_path: Path, brain_block: str, message: str) -> None:
@@ -543,6 +548,53 @@ def test_validate_rechecks_programmatic_config() -> None:
                 phone_number="9876543210",
             )
         )
+
+
+def test_brain_action_mode_defaults_to_text() -> None:
+    assert BrainConfig().action_mode == "text"
+
+
+@pytest.mark.parametrize("action_mode", ["text", "json"])
+def test_brain_action_mode_accepts_valid_values(action_mode: str) -> None:
+    validate(
+        config=Config(
+            audio=AudioConfig(card="Gadget"),
+            dialer=DialerConfig(url="http://127.0.0.1:8080", token="test-token"),
+            brain=BrainConfig(
+                kind="http",
+                base_url="http://127.0.0.1:11434/v1",
+                model="local",
+                action_mode=action_mode,
+            ),
+            agent=AgentConfig(),
+        )
+    )
+
+
+def test_json_action_mode_requires_http_brain() -> None:
+    with pytest.raises(ConfigError, match="requires brain.kind = 'http'"):
+        validate(
+            config=Config(
+                audio=AudioConfig(card="Gadget"),
+                dialer=DialerConfig(url="http://127.0.0.1:8080", token="test-token"),
+                brain=BrainConfig(kind="echo", action_mode="json"),
+                agent=AgentConfig(),
+            )
+        )
+
+
+def test_environment_can_select_json_action_mode(tmp_path: Path) -> None:
+    env = {
+        "TELEPHONE_AGENT_BRAIN__KIND": "http",
+        "TELEPHONE_AGENT_BRAIN__BASE_URL": "http://127.0.0.1:11434/v1",
+        "TELEPHONE_AGENT_BRAIN__MODEL": "local",
+        "TELEPHONE_AGENT_BRAIN__ACTION_MODE": "json",
+    }
+
+    config = load(_write(tmp_path), env=env)
+
+    assert config.brain.kind == "http"
+    assert config.brain.action_mode == "json"
 
 
 def test_example_config_is_complete_and_valid() -> None:
