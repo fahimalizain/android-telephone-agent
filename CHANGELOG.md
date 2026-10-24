@@ -63,6 +63,11 @@ The project is at alpha; minor versions may change APIs and file layout.
 
 ### Changed
 
+- Inbound calls are live-validated once: on 2026-10-24 the helper answered a ringing PSTN
+  call over Bluetooth HFP at mSBC, the Grok Voice session ran four turns in 39.0 s, and a
+  model-requested `/hangup` returned the phone to idle. Locked-screen answering remains
+  unverified, caller ID is still unavailable, latency is unmeasured, and HFP call control
+  is not implemented.
 - The supported deployment is now a Linux host plus an Android phone over Bluetooth HFP.
   Documentation, scripts, and systemd units were rewritten around BlueZ, PipeWire,
   WirePlumber, systemd user units, and the LAN helper.

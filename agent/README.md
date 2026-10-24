@@ -657,9 +657,10 @@ workflow runs `ruff check` and `pytest` on Python 3.11, 3.12, and 3.13. Python
   call. A system service without access to that session cannot use the audio
   path.
 - **Bluetooth validation is limited.** The path was validated on a Linux laptop
-  with a Galaxy A23 and outbound PSTN calls. Live inbound PSTN calls and latency
-  have not been validated. The link was weak (RSSI about -87 dBm); the first call
-  dropped during setup and needed a manual reconnect, and later calls were stable.
+  with a Galaxy A23 over outbound PSTN calls and one live inbound PSTN call.
+  Latency has not been measured, and HFP call control is not implemented. The link
+  was weak (RSSI about -87 dBm); the first call dropped during setup and needed a
+  manual reconnect, and later calls were stable.
 - **No HFP call control.** The agent does not send `ATD`, `ATA`, or `CHUP`.
   Dialing and hangup still require the LAN helper and a reachable phone.
 - **The cellular codec caps fidelity.** AMR-NB, AMR-WB, or EVS quality is the

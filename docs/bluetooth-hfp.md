@@ -11,8 +11,10 @@ Status: validated end to end with a Linux laptop (BlueZ 5.85, PipeWire 1.6.2,
 WirePlumber 0.5.13) and a Samsung Galaxy A23 4G (SM-A235F) on the onboard adapter.
 Outbound PSTN calls were placed through the LAN helper, audio ran over HFP SCO at mSBC
 16 kHz in both directions, and the Grok Voice realtime adapter held a real conversation.
-Inbound answering is implemented but no live inbound PSTN call has been validated, and
-latency has not been measured.
+Inbound answering was validated once on a live PSTN call on 2026-10-24: the helper
+answered after the watcher's 1 s delay and the Grok Voice session ran four turns in 39.0 s
+before a model-requested hangup. Locked-screen answering and vendor restrictions on
+`acceptRingingCall()` remain unverified, and latency has not been measured.
 
 ## 1. Topology
 
@@ -61,7 +63,9 @@ hard-coded `.0` or `.1`.
 | SCO nodes | `bluez_input...` source for the downlink, `bluez_output...` sink for the uplink |
 | Tools | `pw-record` captured the SCO source; `pw-play` injected a test tone into the SCO sink |
 | Link quality | RSSI about -87 dBm; the first call dropped the Bluetooth link during setup and needed a manual reconnect, later calls were stable |
-| Not validated | HFP call control from Linux; a live inbound PSTN call; latency measurements |
+| Inbound call | Helper answered a ringing PSTN call after the watcher's 1 s delay; the Grok Voice session ran 4 turns in 39.0 s, the model requested hangup at 22:01:59, the helper accepted `/hangup`, and the phone was idle at 22:02:05 |
+| Inbound transcript | 10 timestamped JSONL events: `call_start` (`direction=inbound`, empty number), four callee transcripts, four agent replies, `call_end` (`state=idle`, `reason=completed`, `turns=4`, `duration_s≈39.0`); mode 0600 |
+| Not validated | HFP call control from Linux; end-to-end latency; locked-screen answering and vendor `acceptRingingCall()` restrictions |
 
 The cellular codec still caps fidelity. mSBC gives a 16 kHz link between the phone and the
 host, but an AMR-NB network leg remains 8 kHz.
@@ -77,8 +81,12 @@ and then starts audio; `[realtime].greeting` is spoken once those nodes are read
 Auto-answer has no caller-ID filter. The helper does not request `READ_CALL_LOG`, and
 `/state` returns only a phase. Inbound and outbound calls are mutually exclusive: the
 helper rejects `/call` while a call is ringing or active, and the watcher waits for `idle`
-before re-arming. The daemon is unit-tested and the helper endpoints are implemented, but
-no live inbound PSTN call has been validated. See [Inbound calls](./inbound.md).
+before re-arming. The daemon is unit-tested and the helper endpoints are implemented. One
+live inbound PSTN call was validated on 2026-10-24: the helper answered after the watcher's
+1 s delay, the SCO nodes appeared, the Grok Voice session opened and requested the
+configured opening greeting at 22:01:27, and the call ran four turns in 39.0 s before a
+model-requested hangup. Locked-screen answering and vendor restrictions on
+`acceptRingingCall()` remain unverified. See [Inbound calls](./inbound.md).
 
 ## 3. Host prerequisites
 
@@ -468,9 +476,12 @@ journalctl --user -u telephone-agent-bluetooth.service -f
 - **Bluetooth only.** HFP is the only supported audio transport. The earlier Pi-based and
   USB audio route was removed, and its scripts and hardware documentation no longer exist.
   See [ADR 0009](./decisions/0009-bluetooth-only-linux-host.md).
-- **Inbound is not live-validated.** The helper endpoints and the `inbound` daemon are
-  implemented; the daemon is unit-tested, but no live inbound PSTN call has been exercised.
-  Bluetooth cannot signal a ringing call; the helper must answer before SCO nodes exist.
+- **Inbound is validated once.** One live inbound PSTN call succeeded through the helper:
+  the helper answered after the watcher's 1 s delay, the SCO nodes appeared, and the Grok
+  Voice session ran four turns in 39.0 s before a model-requested hangup. Locked-screen
+  answering and vendor restrictions on `acceptRingingCall()` remain unverified, and
+  Bluetooth still cannot signal a ringing call, so the helper must answer before SCO nodes
+  exist.
 - **Weak links drop.** The validated run had RSSI around -87 dBm. The first call dropped
   the Bluetooth link during setup and needed a manual reconnect, although later calls were
   stable. Treat a drop during setup as a known failure mode rather than a code bug.

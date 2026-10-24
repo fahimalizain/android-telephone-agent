@@ -41,10 +41,10 @@ The project builds and produces an installable APK. It has been smoke-tested on 
 Android 36 emulator: service startup, `/health`, bearer authentication, input validation,
 the call window, hangup responses, and the signed release APK. Outbound calls have also
 been exercised with a physical Galaxy A23 over Bluetooth HFP through the LAN helper. The
-`/state` and `/answer` paths compile and are covered by the build, but no live inbound
-PSTN call has been validated. Treat permission prompts, real SIM-label routing, boot
-startup, actual hangup, answering from a locked screen, and vendor battery management as
-unverified until you test them on your device.
+`/state` and `/answer` paths compile and are covered by the build, and one live inbound
+PSTN call was answered through them on 2026-10-24. Treat permission prompts, real SIM-label
+routing, boot startup, actual hangup, answering from a locked screen, and vendor battery
+management as unverified until you test them on your device.
 
 ## Project layout
 
@@ -447,9 +447,10 @@ The foreground service can still be killed by vendor battery management.
 `acceptRingingCall()` and `endCall()` are deprecated and restricted, so answering and
 hangup may not work on every vendor build.
 
-The APK builds, but no physical-device inbound-call or end-to-end audio validation has
-been recorded. SIM labels, locked-screen answering, boot startup, and vendor-specific
-permission behavior must be tested on the target phone before relying on them.
+The APK builds. One physical-device inbound PSTN call was answered and ended through the
+helper on 2026-10-24, and outbound calls have been exercised over Bluetooth HFP. SIM
+labels, locked-screen answering, boot startup, and vendor-specific permission behavior
+must still be tested on the target phone before relying on them.
 
 For the protocol, threat model, and provisioning details, read `docs/dial-helper.md` and
 `docs/android-setup.md`.

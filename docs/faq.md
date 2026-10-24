@@ -113,7 +113,9 @@ scope. See [operations](./operations.md).
 Yes, as an opt-in mode. `telephone-agent inbound`, or the
 `telephone-agent-inbound.service` user unit, polls the helper's `GET /state`, calls
 `POST /answer` on a ringing call, and runs one Grok Voice realtime session. The daemon is
-unit-tested, but no live inbound PSTN call has been validated yet.
+unit-tested, and one live inbound PSTN call was validated on 2026-10-24: the helper
+answered after the watcher's 1 s delay, the session ran four turns in 39.0 s, and a
+model-requested hangup returned the phone to idle.
 
 It answers **every** ringing call on the agent SIM. There is no caller-ID filter, allowlist,
 or screening because the helper does not request `READ_CALL_LOG`. `acceptRingingCall()` is

@@ -1,8 +1,9 @@
 # Dial Helper
 
 Status: reference implementation, not production-hardened. Buildable APK with Android 36
-emulator smoke tests; outbound calls validated with a physical Galaxy A23 over Bluetooth;
-live inbound-call validation pending.
+emulator smoke tests; outbound calls and one live inbound PSTN call validated with a
+physical Galaxy A23 over Bluetooth. Locked-screen answering and vendor restrictions on
+`acceptRingingCall()` remain unverified.
 Applies to the Samsung Galaxy A23 4G (SM-A235F), One UI, Android 13-15.
 
 ## Purpose

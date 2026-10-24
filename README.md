@@ -27,8 +27,8 @@ the only supported audio transport; see the [Bluetooth HFP guide](docs/bluetooth
 and [ADR 0009](docs/decisions/0009-bluetooth-only-linux-host.md).
 
 An opt-in inbound mode can also answer calls to the agent SIM and connect them to the
-Grok Voice realtime adapter. It is implemented and unit-tested but has not yet been
-validated on a live inbound PSTN call; see [Inbound calls](docs/inbound.md).
+Grok Voice realtime adapter. It has been validated once on a live inbound PSTN call over
+Bluetooth HFP; see [Inbound calls](docs/inbound.md).
 
 Other agents can delegate calls to the runtime over MCP and A2A; one process serves both
 endpoints from a single call queue. The control plane uses one shared admin-level bearer
@@ -269,7 +269,7 @@ The map matches the layout described in section 14 of the design brief.
 | v0 | Manual dial and Bluetooth HFP SCO verification | Validated on a Linux laptop: helper dial, mSBC 16 kHz SCO, Grok conversation, agent-initiated hangup |
 | v0.1 | Scheduler, one call per slot, bounded retries, heartbeat and alerting | Planned |
 | v0.2 | Latency measurement; bundled STT/TTS adapters for the text pipeline | Planned; Grok supplies barge-in and endpointing |
-| v0.3 | Inbound calls | Implemented and unit-tested; live inbound PSTN validation pending |
+| v0.3 | Inbound calls | Implemented and unit-tested; validated on one live inbound PSTN call over Bluetooth HFP |
 
 ### Validation
 
@@ -284,12 +284,26 @@ The run also exposed a stale ten-minute call window in the helper, which now che
 Telecom call state before rejecting `/call`.
 
 The Bluetooth link was weak (RSSI about -87 dBm), and the first call dropped the link
-during setup and needed a manual reconnect; later calls were stable. The run validates
-the Bluetooth path on a laptop. It does not validate live inbound PSTN calls or latency.
+during setup and needed a manual reconnect; later calls were stable. The outbound run
+validates the Bluetooth path on a laptop; latency remains unmeasured.
 
-Milestones are sequential in the plan. Inbound (v0.3) now has an implementation, but it
-depends on the helper's call-state API and has not been exercised on a live inbound call.
-See [docs/design-brief.md](docs/design-brief.md) section 15 and
+Inbound was validated separately, once, on the same laptop and phone on 2026-10-24. At
+22:01:26 the helper answered a ringing inbound PSTN call after the watcher's 1 s delay,
+and the Grok Voice session opened and requested the configured opening greeting at
+22:01:27. The
+call ran four turns in 39.0 s and ended `completed`: the model requested hangup at
+22:01:59 ("Caller said goodbye and ended the conversation."), the helper accepted
+`/hangup`, and the call returned to idle at 22:02:05. The local transcript recorded ten
+timestamped JSONL events in a mode-0600 file: `call_start` with `direction=inbound` and an
+empty number, four callee transcripts, four agent replies, and `call_end` with `state=idle`,
+`reason=completed`, `turns=4`, and `duration_s≈39.0`. Caller ID remains unavailable
+because the helper does not request `READ_CALL_LOG`.
+
+Milestones are sequential in the plan. Inbound (v0.3) is implemented and has been
+exercised once on a live inbound PSTN call through the helper's call-state API.
+Locked-screen answering and vendor restrictions on `acceptRingingCall()` remain
+unverified, and answering still depends on the helper rather than HFP call control. See
+[docs/design-brief.md](docs/design-brief.md) section 15 and
 [docs/inbound.md](docs/inbound.md).
 
 ## Safety, privacy, and legal
@@ -325,9 +339,10 @@ retention schedule. Call audio itself is not written to disk.
 - Bluetooth HFP is the only supported audio transport. The host must run BlueZ, PipeWire,
   and WirePlumber in the user session that runs the agent; a system service that does not
   share that session cannot see the SCO nodes.
-- The HFP path is validated on a Linux laptop with a Galaxy A23, not with live inbound
-  calls. The validated link was weak (RSSI about -87 dBm), and the first call dropped
-  Bluetooth during setup and needed a manual reconnect.
+- The HFP path is validated on a Linux laptop with a Galaxy A23 for outbound calls and one
+  live inbound call. The validated link was weak (RSSI about -87 dBm); the first outbound
+  call dropped Bluetooth during setup and needed a manual reconnect, and Bluetooth was
+  reconnected manually before the inbound test.
 - Inbound answering is opt-in and answers every ringing call on the agent SIM. The helper
   does not request `READ_CALL_LOG`, so there is no caller-ID filter, allowlist, or
   screening. Use a SIM dedicated to the agent.

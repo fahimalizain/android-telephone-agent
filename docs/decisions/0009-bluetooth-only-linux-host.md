@@ -76,9 +76,13 @@ HFP.
 - **Weak link during setup.** The validated run at about -87 dBm dropped the first call and
   needed a manual reconnect. Treat a setup drop as a known failure mode and verify the link
   before a scheduled call.
-- **Inbound is not live-validated.** The inbound watcher and helper endpoints are
-  implemented and unit-tested, but no live inbound PSTN call has been exercised. Bluetooth
-  cannot signal a ringing call, so the helper must answer before SCO nodes exist.
+- **Inbound depends on the helper.** The inbound watcher and helper endpoints are
+  implemented and unit-tested, and one live inbound PSTN call succeeded on 2026-10-24: the
+  helper answered after the watcher's 1 s delay and the session ran four turns in 39.0 s
+  before a model-requested hangup. Auto-answer still has no caller ID or filter,
+  locked-screen answering and vendor restrictions on `acceptRingingCall()` are unverified,
+  and Bluetooth cannot signal a ringing call, so the helper must answer before SCO nodes
+  exist.
 - **User-session coupling.** Without lingering, the user manager and PipeWire stop when the
   last session ends, and timers or SCO nodes disappear.
 - **Host hardware varies.** Bluetooth adapter behavior, codec support, and Wi-Fi

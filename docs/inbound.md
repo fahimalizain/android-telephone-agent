@@ -10,6 +10,28 @@ The outbound path is documented in [Voice agent](voice-agent.md) and
 [Architecture](architecture.md). The helper's full API is in
 [Dial helper](dial-helper.md).
 
+## Status
+
+Validated once on a live inbound PSTN call on 2026-10-24 (Asia/Kolkata). On the validated
+Linux laptop (MSI GL738SE; BlueZ 5.85, PipeWire 1.6.2, WirePlumber 0.5.13) with a Samsung
+Galaxy A23 4G (SM-A235F) over Bluetooth HFP at mSBC, the helper answered a ringing call at
+22:01:26 after the watcher's 1 s delay. The Grok Voice session opened and requested the
+configured opening greeting at 22:01:27. The call ran four turns in 39.0 s and ended with
+`reason=completed`: the model requested hangup at 22:01:59 ("Caller said goodbye and
+ended the conversation."), the helper accepted `/hangup`, and the phone returned to
+`idle` at 22:02:05.
+
+The local transcript recorded ten timestamped JSONL events: `call_start` with
+`direction=inbound` and an empty `number`, four callee transcripts, four agent replies,
+and `call_end` with `state=idle`, `reason=completed`, `turns=4`, and
+`duration_s≈39.0`. The file had mode `0600`.
+
+Caveats: this is one test on one device. Locked-screen answering and vendor restrictions
+on `acceptRingingCall()` are unverified, caller ID is still unavailable, latency is still
+unmeasured, and HFP call control is still not implemented, so the helper answered the
+call. The link was weak (RSSI about -87 dBm) and Bluetooth had disconnected earlier, so it
+was manually reconnected before the test.
+
 ## Topology
 
 ```text

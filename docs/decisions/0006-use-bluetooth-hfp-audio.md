@@ -42,9 +42,15 @@ the helper accepting `/hangup` with `202`. The link was weak (RSSI about -87 dBm
 first call dropped during setup and needed a manual reconnect, and later calls were
 stable.
 
-What was **not** validated: live inbound PSTN calls, end-to-end latency, and HFP call
-control from Linux. Dialing and hangup still go through the LAN helper app. Bluetooth
-carries audio only, and SCO nodes exist only after a call is answered.
+Inbound was validated separately, once, on 2026-10-24, using the helper rather than HFP
+call control: the helper answered a ringing PSTN call after the watcher's 1 s delay, audio
+ran over the same HFP SCO path at mSBC 16 kHz, and the Grok Voice session ran four turns in
+39.0 s before a model-requested `/hangup` returned the phone to idle.
+
+What was **not** validated: end-to-end latency, HFP call control from Linux, and
+locked-screen answering or vendor restrictions on `acceptRingingCall()`. Dialing and
+hangup still go through the LAN helper app. Bluetooth carries audio only, and SCO nodes
+exist only after a call is answered.
 
 ## Decision
 
@@ -115,7 +121,8 @@ and `POST /hangup`. Phone A must be reachable on the LAN.
 - mSBC is 16 kHz, but the cellular codec still caps end-to-end fidelity. Bluetooth does not
   make the call wideband if the network leg is narrowband.
 - mSBC is not guaranteed on every phone or adapter; the link can fall back to 8 kHz CVSD.
-- No live inbound PSTN call has been validated, and latency has not been measured.
+- Inbound was validated once, through the helper rather than HFP call control. Latency has
+  not been measured, and locked-screen answering remains unverified.
 
 ### Risks
 

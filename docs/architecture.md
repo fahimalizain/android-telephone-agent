@@ -31,8 +31,8 @@ Non-goals:
 - Intercepting or recording a call already in progress on the owner's phone.
 - Root, bootloader unlocking, custom firmware, or vendor HAL changes.
 - VoIP or SIP; the call leg is cellular.
-- Inbound PSTN calls in the first milestone. The opt-in v0.3 inbound mode now answers
-  them, but it has not been validated on a live call; see [Inbound calls](./inbound.md).
+- Inbound PSTN calls in the first milestone. The opt-in v0.3 inbound mode answers them and
+  has been validated once on a live call; see [Inbound calls](./inbound.md).
   Inbound control-plane tasking over MCP and A2A is in scope.
 - More than one concurrent call per phone and host pair.
 - USB audio devices, single-board-computer hardware, or a fixed bill of materials. That route was
@@ -125,10 +125,13 @@ See [Bluetooth HFP](./bluetooth-hfp.md) and
 
 This path was validated end to end on a Linux laptop with a Samsung Galaxy A23 4G over
 outbound PSTN calls: mSBC at 16 kHz in both directions, with the Grok Voice realtime
-adapter holding a five-turn conversation. The link was weak (RSSI about -87 dBm), and the
-first call dropped Bluetooth during setup and needed a manual reconnect; later calls were
-stable. Live inbound calls and latency measurements remain unvalidated. The cellular
-codec still caps fidelity.
+adapter holding a five-turn conversation. A single inbound PSTN call was validated on the
+same host and phone on 2026-10-24: the helper answered after the watcher's 1 s delay, and
+the Grok Voice session ran four turns in 39.0 s before a model-requested hangup. The link
+was weak (RSSI about -87 dBm), and the first outbound call dropped Bluetooth during setup
+and needed a manual reconnect; Bluetooth was manually reconnected before the inbound test.
+Latency measurements and HFP call control remain unvalidated. The cellular codec still
+caps fidelity.
 
 ## Control plane: MCP and A2A
 
@@ -448,10 +451,13 @@ Carried from the [design brief](./design-brief.md); status as of 2026-10-24.
 3. **Local fallback models.** A larger Linux host with Whisper.cpp and Piper, or
    cloud-only.
 4. **Call content and persona.** Briefing, check-in, or reminder; prompt design is out of scope.
-5. **Inbound calls. Implemented, pending live validation.** The helper exposes
+5. **Inbound calls. Implemented and validated once.** The helper exposes
    `GET /state` and `POST /answer`; an `inbound` daemon polls and answers every ringing
-   call, then runs one Grok Voice session. Bluetooth carries audio only, so the SCO nodes
-   appear after the answer, not while ringing. There is no caller-ID filter. See
+   call, then runs one Grok Voice session. One live inbound PSTN call succeeded on
+   2026-10-24: four turns in 39.0 s, with a model-requested hangup through the helper.
+   Locked-screen answering and vendor restrictions on `acceptRingingCall()` remain
+   unverified. Bluetooth carries audio only, so the SCO nodes appear after the answer,
+   not while ringing. There is no caller-ID filter. See
    [Inbound calls](./inbound.md).
 
 ## 14. Related documents

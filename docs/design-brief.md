@@ -46,8 +46,8 @@ ships in the alpha and what remains follow-up work.
 - Not an inbound PSTN call service in the first milestone. Inbound **control-plane
   tasking** over MCP and A2A is in scope: another agent may ask this agent to place an
   outbound call. A person dialing the agent's SIM is still not answered by the default
-  configuration; an opt-in v0.3 inbound mode is implemented but not live-validated. See
-  [Inbound calls](./inbound.md).
+  configuration; an opt-in v0.3 inbound mode is implemented and was validated once on a
+  live inbound PSTN call. See [Inbound calls](./inbound.md).
 - Not a single-board-computer or USB audio project. That route was removed; see
   [ADR 0009](./decisions/0009-bluetooth-only-linux-host.md).
 
@@ -112,9 +112,11 @@ The trade-offs are pairing and reconnection, call-scoped SCO nodes, a shared 2.4
 radio, and the requirement that the agent run in the same user session as PipeWire and
 WirePlumber. Dialing and hangup still go through the LAN helper; HFP AT call control is
 not implemented. The path was validated end to end on a Linux laptop with a Galaxy A23 4G
-over outbound PSTN calls, including a Grok Voice realtime conversation. Live inbound
-calls and latency measurements remain unvalidated. See [Bluetooth HFP](./bluetooth-hfp.md)
-and [ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
+over outbound PSTN calls, including a Grok Voice realtime conversation, and once on a live
+inbound PSTN call: the helper answered after the watcher's 1 s delay and the session ran
+four turns in 39.0 s before a model-requested hangup. Latency measurements and HFP call
+control remain unvalidated. See [Bluetooth HFP](./bluetooth-hfp.md) and
+[ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
 
 ## 5. Host requirements
 
@@ -394,5 +396,8 @@ android-helper/
    exposes `GET /state` and `POST /answer`, and the daemon polls, answers, and runs one
    Grok Voice session per call. Bluetooth carries audio only, so HFP has no ringing signal
    and the SCO nodes appear only after the call is answered. It answers every call with no
-   caller-ID filter. The daemon is unit-tested, but no live inbound PSTN call has been
-   validated. See [Inbound calls](./inbound.md).
+   caller-ID filter. The daemon is unit-tested and one live inbound PSTN call was validated
+   on 2026-10-24: the helper answered after the watcher's 1 s delay and the session ran
+   four turns in 39.0 s before a model-requested hangup. Locked-screen answering and vendor
+   restrictions on `acceptRingingCall()` remain unverified. See
+   [Inbound calls](./inbound.md).
