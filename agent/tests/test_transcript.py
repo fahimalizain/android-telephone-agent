@@ -122,7 +122,7 @@ def test_call_start_omits_empty_objective_and_non_realtime_metadata(tmp_path: Pa
     logger.call_start(
         direction="outbound",
         number="+15555550100",
-        audio_backend="alsa",
+        audio_backend="pipewire",
         realtime_kind="off",
     )
     logger.close()
@@ -130,7 +130,7 @@ def test_call_start_omits_empty_objective_and_non_realtime_metadata(tmp_path: Pa
     assert logger.path is not None
     record = _read(logger.path)[0]
     assert record["number"] == "+15555550100"
-    assert record["audio_backend"] == "alsa"
+    assert record["audio_backend"] == "pipewire"
     assert record["realtime_kind"] == "off"
     assert "objective" not in record
     assert "realtime_model" not in record

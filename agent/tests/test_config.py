@@ -25,7 +25,7 @@ BASE_CONFIG = """
 phone_number = "+15555550100"
 
 [audio]
-card = "UAC1Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://192.168.1.10:8080"
@@ -43,7 +43,7 @@ def test_load_applies_defaults(tmp_path: Path) -> None:
     config = load(_write(tmp_path), env={})
 
     assert config.phone_number == "+15555550100"
-    assert config.audio == AudioConfig(card="UAC1Gadget")
+    assert config.audio == AudioConfig(bluetooth_address="AA:BB:CC:DD:EE:FF")
     assert config.dialer == DialerConfig(
         url="http://192.168.1.10:8080",
         token="test-token",
@@ -79,8 +79,8 @@ def test_load_reads_all_sections(tmp_path: Path) -> None:
 phone_number = "+15555550199"
 
 [audio]
-card = "Gadget"
-device = 1
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
+node_timeout_s = 12.5
 sample_rate = 48000
 channels = 1
 frame_ms = 10
@@ -114,8 +114,8 @@ holding_phrase = "Hold on."
 
     config = load(path, env={})
 
-    assert config.audio.card == "Gadget"
-    assert config.audio.device == 1
+    assert config.audio.bluetooth_address == "AA:BB:CC:DD:EE:FF"
+    assert config.audio.node_timeout_s == 12.5
     assert config.audio.sample_rate == 48000
     assert config.audio.frame_ms == 10
     assert config.dialer.retries == 0
@@ -137,7 +137,7 @@ holding_phrase = "Hold on."
 def test_environment_overrides_toml(tmp_path: Path) -> None:
     env = {
         "TELEPHONE_AGENT_PHONE_NUMBER": "+15555550111",
-        "TELEPHONE_AGENT_AUDIO__CARD": "EnvCard",
+        "TELEPHONE_AGENT_AUDIO__BLUETOOTH_ADDRESS": "11:22:33:44:55:66",
         "TELEPHONE_AGENT_AUDIO__SAMPLE_RATE": "48000",
         "TELEPHONE_AGENT_AUDIO__FRAME_MS": "10",
         "TELEPHONE_AGENT_DIALER__TOKEN": "env-token",
@@ -154,7 +154,7 @@ def test_environment_overrides_toml(tmp_path: Path) -> None:
     config = load(_write(tmp_path), env=env)
 
     assert config.phone_number == "+15555550111"
-    assert config.audio.card == "EnvCard"
+    assert config.audio.bluetooth_address == "11:22:33:44:55:66"
     assert config.audio.sample_rate == 48000
     assert config.audio.frame_ms == 10
     assert config.dialer.token == "env-token"
@@ -267,7 +267,7 @@ def test_realtime_rejects_an_unsupported_audio_rate(tmp_path: Path) -> None:
         tmp_path,
         """
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 sample_rate = 12000
 
 [dialer]
@@ -366,7 +366,7 @@ def test_empty_server_token_is_allowed_at_load_time(tmp_path: Path) -> None:
 
 def test_unrelated_environment_is_ignored(tmp_path: Path) -> None:
     config = load(_write(tmp_path), env={"PATH": "/usr/bin", "TELEPHONE_HOME": "x"})
-    assert config.audio.card == "UAC1Gadget"
+    assert config.audio.bluetooth_address == "AA:BB:CC:DD:EE:FF"
 
 
 def test_phone_number_is_optional(tmp_path: Path) -> None:
@@ -374,7 +374,7 @@ def test_phone_number_is_optional(tmp_path: Path) -> None:
         tmp_path,
         """
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8080"
@@ -398,7 +398,7 @@ def test_invalid_phone_numbers_are_rejected(tmp_path: Path, phone: str) -> None:
 phone_number = "{phone}"
 
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8080"
@@ -428,16 +428,13 @@ def test_missing_config_file_is_actionable(tmp_path: Path) -> None:
 
 
 def test_audio_config_keeps_positional_field_order_compatible() -> None:
-    audio = AudioConfig("Card", 0, 16_000, 1, 20)
+    audio = AudioConfig("AA:BB:CC:DD:EE:FF", 15.0, 16_000, 1, 20)
 
-    assert audio.card == "Card"
-    assert audio.device == 0
+    assert audio.bluetooth_address == "AA:BB:CC:DD:EE:FF"
+    assert audio.node_timeout_s == 15.0
     assert audio.sample_rate == 16_000
     assert audio.channels == 1
     assert audio.frame_ms == 20
-    assert audio.backend == "alsa"
-    assert audio.bluetooth_address == ""
-    assert audio.node_timeout_s == 30.0
 
 
 def test_bluetooth_audio_config_is_accepted(tmp_path: Path) -> None:
@@ -445,7 +442,6 @@ def test_bluetooth_audio_config_is_accepted(tmp_path: Path) -> None:
         tmp_path,
         """
 [audio]
-backend = "pipewire"
 bluetooth_address = "AA:BB:CC:DD:EE:FF"
 node_timeout_s = 12.5
 
@@ -457,18 +453,15 @@ token = "test-token"
 
     config = load(path, env={})
 
-    assert config.audio.backend == "pipewire"
     assert config.audio.bluetooth_address == "AA:BB:CC:DD:EE:FF"
     assert config.audio.node_timeout_s == 12.5
-    assert config.audio.card == ""
 
 
-def test_bluetooth_backend_requires_an_address(tmp_path: Path) -> None:
+def test_bluetooth_address_is_required(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
         """
 [audio]
-backend = "pipewire"
 
 [dialer]
 url = "http://127.0.0.1:8080"
@@ -485,7 +478,6 @@ def test_bluetooth_address_is_validated(tmp_path: Path) -> None:
         tmp_path,
         """
 [audio]
-backend = "pipewire"
 bluetooth_address = "not-a-mac"
 
 [dialer]
@@ -498,30 +490,12 @@ token = "test-token"
         load(path, env={})
 
 
-def test_unknown_audio_backend_is_rejected(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path,
-        """
-[audio]
-backend = "jack"
-card = "Gadget"
-
-[dialer]
-url = "http://127.0.0.1:8080"
-token = "test-token"
-""",
-    )
-
-    with pytest.raises(ConfigError, match="audio.backend"):
-        load(path, env={})
-
-
 def test_node_timeout_must_be_positive(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
         """
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 node_timeout_s = 0
 
 [dialer]
@@ -534,22 +508,20 @@ token = "test-token"
         load(path, env={})
 
 
-def test_environment_can_select_bluetooth(tmp_path: Path) -> None:
+def test_environment_can_set_bluetooth_audio(tmp_path: Path) -> None:
     env = {
-        "TELEPHONE_AGENT_AUDIO__BACKEND": "pipewire",
         "TELEPHONE_AGENT_AUDIO__BLUETOOTH_ADDRESS": "AA:BB:CC:DD:EE:FF",
         "TELEPHONE_AGENT_AUDIO__NODE_TIMEOUT_S": "5",
     }
 
     config = load(_write(tmp_path), env=env)
 
-    assert config.audio.backend == "pipewire"
     assert config.audio.bluetooth_address == "AA:BB:CC:DD:EE:FF"
     assert config.audio.node_timeout_s == 5.0
 
 
 def test_invalid_toml_is_reported(tmp_path: Path) -> None:
-    path = _write(tmp_path, "[audio\ncard = 'x'\n")
+    path = _write(tmp_path, "[audio\nbluetooth_address = 'x'\n")
 
     with pytest.raises(ConfigError, match="invalid TOML"):
         load(path, env={})
@@ -567,7 +539,7 @@ def test_unknown_section_key_is_rejected(tmp_path: Path) -> None:
         tmp_path,
         """
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 gain = 3
 
 [dialer]
@@ -583,13 +555,24 @@ token = "test-token"
 @pytest.mark.parametrize(
     "audio_block, message",
     [
-        ('[audio]\ncard = ""', "audio.card is required"),
-        ('[audio]\ncard = "bad card"', "audio.card must contain"),
-        ('[audio]\ncard = "Gadget"\nchannels = 2', "audio.channels must be 1"),
-        ('[audio]\ncard = "Gadget"\nsample_rate = 7999', "audio.sample_rate"),
-        ('[audio]\ncard = "Gadget"\nsample_rate = 11025\nframe_ms = 20', "whole number"),
-        ('[audio]\ncard = "Gadget"\nframe_ms = 0', "audio.frame_ms"),
-        ('[audio]\ncard = "Gadget"\ndevice = -1', "audio.device"),
+        ("[audio]", "bluetooth_address is required"),
+        ('[audio]\nbluetooth_address = "not-a-mac"', "six colon-separated"),
+        (
+            '[audio]\nbluetooth_address = "AA:BB:CC:DD:EE:FF"\nchannels = 2',
+            "audio.channels must be 1",
+        ),
+        (
+            '[audio]\nbluetooth_address = "AA:BB:CC:DD:EE:FF"\nsample_rate = 7999',
+            "audio.sample_rate",
+        ),
+        (
+            '[audio]\nbluetooth_address = "AA:BB:CC:DD:EE:FF"\nsample_rate = 11025\nframe_ms = 20',
+            "whole number",
+        ),
+        (
+            '[audio]\nbluetooth_address = "AA:BB:CC:DD:EE:FF"\nframe_ms = 0',
+            "audio.frame_ms",
+        ),
     ],
 )
 def test_audio_validation(tmp_path: Path, audio_block: str, message: str) -> None:
@@ -624,7 +607,7 @@ def test_dialer_validation(tmp_path: Path, dialer_block: str, message: str) -> N
         tmp_path,
         f"""
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 {dialer_block}
 """,
@@ -658,7 +641,7 @@ def test_brain_validation(tmp_path: Path, brain_block: str, message: str) -> Non
         tmp_path,
         f"""
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8080"
@@ -677,7 +660,7 @@ def test_http_brain_allows_no_api_key(tmp_path: Path) -> None:
         tmp_path,
         """
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8080"
@@ -716,7 +699,7 @@ def test_agent_validation(tmp_path: Path, agent_block: str, message: str) -> Non
         tmp_path,
         f"""
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8080"
@@ -735,7 +718,7 @@ def test_wrong_toml_type_is_rejected(tmp_path: Path) -> None:
         tmp_path,
         """
 [audio]
-card = "Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 sample_rate = "16000"
 
 [dialer]
@@ -759,7 +742,7 @@ def test_invalid_environment_value_is_rejected(tmp_path: Path) -> None:
         "TELEPHONE_AGENT_AUDIO__GAIN",
         "TELEPHONE_AGENT_SPEECH__MODEL",
         "TELEPHONE_AGENT_NOPE",
-        "TELEPHONE_AGENT_AUDIO__CARD__EXTRA",
+        "TELEPHONE_AGENT_AUDIO__GAIN__EXTRA",
     ],
 )
 def test_invalid_environment_names_are_rejected(tmp_path: Path, name: str) -> None:
@@ -771,7 +754,7 @@ def test_validate_rechecks_programmatic_config() -> None:
     with pytest.raises(ConfigError, match="E.164"):
         validate(
             config=Config(
-                audio=AudioConfig(card="Gadget"),
+                audio=AudioConfig(bluetooth_address="AA:BB:CC:DD:EE:FF"),
                 dialer=DialerConfig(url="http://127.0.0.1:8080", token="test-token"),
                 brain=BrainConfig(),
                 agent=AgentConfig(),
@@ -788,7 +771,7 @@ def test_brain_action_mode_defaults_to_text() -> None:
 def test_brain_action_mode_accepts_valid_values(action_mode: str) -> None:
     validate(
         config=Config(
-            audio=AudioConfig(card="Gadget"),
+            audio=AudioConfig(bluetooth_address="AA:BB:CC:DD:EE:FF"),
             dialer=DialerConfig(url="http://127.0.0.1:8080", token="test-token"),
             brain=BrainConfig(
                 kind="http",
@@ -805,7 +788,7 @@ def test_json_action_mode_requires_http_brain() -> None:
     with pytest.raises(ConfigError, match="requires brain.kind = 'http'"):
         validate(
             config=Config(
-                audio=AudioConfig(card="Gadget"),
+                audio=AudioConfig(bluetooth_address="AA:BB:CC:DD:EE:FF"),
                 dialer=DialerConfig(url="http://127.0.0.1:8080", token="test-token"),
                 brain=BrainConfig(kind="echo", action_mode="json"),
                 agent=AgentConfig(),
@@ -881,7 +864,7 @@ def test_example_config_is_complete_and_valid() -> None:
 
     config = load(example, env={})
 
-    assert config.audio.card
+    assert config.audio.bluetooth_address
     assert config.dialer.url
     assert config.dialer.token
     assert config.audio.sample_rate == 16000

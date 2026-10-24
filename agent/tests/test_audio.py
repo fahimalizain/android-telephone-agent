@@ -1,4 +1,4 @@
-"""Tests for the ALSA gadget and PipeWire Bluetooth audio backends."""
+"""Tests for the PipeWire Bluetooth HFP audio backend and SCO discovery."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import time
 import pytest
 from telephone_agent.audio import (
     AudioError,
-    GadgetAudio,
     PipeWireAudio,
     normalize_bluetooth_address,
     sco_nodes_from_dump,
@@ -251,42 +250,9 @@ def test_pipewire_rejects_invalid_timeouts() -> None:
         PipeWireAudio(ADDRESS, poll_interval_s=0)
 
 
-def test_gadget_commands_are_unchanged() -> None:
-    audio = GadgetAudio("UAC1Gadget")
-
-    assert audio.description == "plughw:CARD=UAC1Gadget,DEV=0"
-    assert audio._capture_command() == [
-        "arecord",
-        "-q",
-        "-D",
-        "plughw:CARD=UAC1Gadget,DEV=0",
-        "-f",
-        "S16_LE",
-        "-r",
-        "16000",
-        "-c",
-        "1",
-        "-t",
-        "raw",
-    ]
-    assert audio._playback_command() == [
-        "aplay",
-        "-q",
-        "-D",
-        "plughw:CARD=UAC1Gadget,DEV=0",
-        "-f",
-        "S16_LE",
-        "-r",
-        "16000",
-        "-c",
-        "1",
-        "-t",
-        "raw",
-    ]
-
-
-def test_frames_streams_pcm_and_stops_capture() -> None:
-    audio = GadgetAudio("UAC1Gadget")
+def test_frames_streams_pcm_and_stops_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    audio = PipeWireAudio(ADDRESS)
+    monkeypatch.setattr(audio, "_discover_nodes", lambda: None)
     # Two 20 ms mono frames at 16 kHz: 640 bytes each.
     audio._capture_command = lambda: [  # type: ignore[method-assign]
         sys.executable,
@@ -301,8 +267,9 @@ def test_frames_streams_pcm_and_stops_capture() -> None:
     assert audio._capture is None
 
 
-def test_frames_reports_capture_stderr_and_status() -> None:
-    audio = GadgetAudio("UAC1Gadget")
+def test_frames_reports_capture_stderr_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    audio = PipeWireAudio(ADDRESS)
+    monkeypatch.setattr(audio, "_discover_nodes", lambda: None)
     audio._capture_command = lambda: [  # type: ignore[method-assign]
         sys.executable,
         "-c",
@@ -316,7 +283,7 @@ def test_frames_reports_capture_stderr_and_status() -> None:
 
 
 def test_play_writes_pcm_to_the_player() -> None:
-    audio = GadgetAudio("UAC1Gadget")
+    audio = PipeWireAudio(ADDRESS)
     audio._playback_command = lambda: [  # type: ignore[method-assign]
         sys.executable,
         "-c",
@@ -327,7 +294,7 @@ def test_play_writes_pcm_to_the_player() -> None:
 
 
 def test_play_reports_player_stderr_and_status() -> None:
-    audio = GadgetAudio("UAC1Gadget")
+    audio = PipeWireAudio(ADDRESS)
     audio._playback_command = lambda: [  # type: ignore[method-assign]
         sys.executable,
         "-c",
@@ -341,7 +308,7 @@ def test_play_reports_player_stderr_and_status() -> None:
 
 
 def test_streaming_playback_writes_chunks_and_closes() -> None:
-    audio = GadgetAudio("UAC1Gadget")
+    audio = PipeWireAudio(ADDRESS)
     audio._playback_command = lambda: [  # type: ignore[method-assign]
         sys.executable,
         "-c",
@@ -354,7 +321,7 @@ def test_streaming_playback_writes_chunks_and_closes() -> None:
 
 
 def test_streaming_playback_stop_terminates_the_player() -> None:
-    audio = GadgetAudio("UAC1Gadget")
+    audio = PipeWireAudio(ADDRESS)
     audio._playback_command = lambda: [  # type: ignore[method-assign]
         sys.executable,
         "-c",
@@ -372,7 +339,7 @@ def test_streaming_playback_stop_terminates_the_player() -> None:
 
 
 def test_streaming_playback_can_restart_after_stop() -> None:
-    audio = GadgetAudio("UAC1Gadget")
+    audio = PipeWireAudio(ADDRESS)
     audio._playback_command = lambda: [  # type: ignore[method-assign]
         sys.executable,
         "-c",

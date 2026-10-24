@@ -1,26 +1,18 @@
-"""Audio backends for the USB gadget and Bluetooth HFP headset paths.
+"""Bluetooth HFP audio through PipeWire.
 
-Two transports can put the agent on both directions of a cellular call:
+The host advertises the Hands-Free Profile headset role (HF) and Phone A is the
+audio gateway (AG). PipeWire exposes the call as a SCO source (downlink) and a
+SCO sink (uplink) while the call is active. The node names carry the phone's
+Bluetooth address and a per-connection suffix, so they are discovered with
+``pw-dump`` rather than hard-coded.
 
-* **USB Audio Class gadget** (:class:`GadgetAudio`): the host enumerates as a
-  wired headset on Phone A. ALSA's direction is inverted relative to a normal
-  sound card: recording from the gadget card receives the remote party, and
-  playing to the card sends audio to Phone A's uplink.
-* **Bluetooth HFP** (:class:`PipeWireAudio`): the host advertises the Hands-Free
-  Profile headset role (HF) and Phone A is the audio gateway (AG). PipeWire
-  exposes the call as a SCO source (downlink) and a SCO sink (uplink) while the
-  call is active. The node names carry the phone's Bluetooth address and a
-  per-connection suffix, so they are discovered with ``pw-dump`` rather than
-  hard-coded.
-
-``arecord``/``aplay`` and ``pw-record``/``pw-play`` are invoked through
-subprocesses. The USB gadget runs at 48 kHz stereo; the default processing rate
-is 16 kHz mono, which is enough for the cellular codec and cheaper on a small
-host. ``plughw`` and PipeWire perform the format conversion, so the values in
-:class:`~telephone_agent.config.AudioConfig` are the processing format rather
-than the wire format. ``play()`` is the one-shot path for the text pipeline;
-``start_playback()`` returns a reusable stream for the realtime adapter and can
-be interrupted for barge-in.
+``pw-record``/``pw-play`` are invoked through subprocesses. The default
+processing rate is 16 kHz mono, which matches the wideband mSBC SCO link and is
+cheaper on a small host; PipeWire resamples the 8 kHz CVSD link when narrowband
+is negotiated. The values in :class:`~telephone_agent.config.AudioConfig` are
+the processing format rather than the wire format. ``play()`` is the one-shot
+path for the text pipeline; ``start_playback()`` returns a reusable stream for
+the realtime adapter and can be interrupted for barge-in.
 
 No audio is written to disk. Capture diagnostics are kept in an anonymous
 temporary file only so that a failed start can be reported.
@@ -48,19 +40,12 @@ __all__ = [
     "AudioDevice",
     "AudioError",
     "AudioStats",
-    "CaptureDevice",
-    "GadgetAudio",
     "PipeWireAudio",
     "PlaybackStream",
 ]
 
 logger = logging.getLogger(__name__)
 
-_CARD_LINE = re.compile(
-    r"^card\s+(?P<card_index>\d+):\s+(?P<card_id>\S+)\s+"
-    r"\[(?P<card_name>.*?)\],\s+device\s+(?P<device_index>\d+):\s+"
-    r"(?P<device_name>.*?)\s+\[(?P<device_id>.*?)\]"
-)
 _BLUETOOTH_ADDRESS = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 _STOP_TIMEOUT_S = 2.0
 _PLAYBACK_DRAIN_TIMEOUT_S = 10.0
@@ -74,29 +59,6 @@ _STREAM_PROPERTIES = '{"node.dont-fallback": true, "node.dont-reconnect": true}'
 
 class AudioError(RuntimeError):
     """Raised when an audio command cannot be run or exits with an error."""
-
-
-@dataclass(frozen=True, slots=True)
-class CaptureDevice:
-    """One capture device reported by ``arecord -l``."""
-
-    card_index: int
-    card_id: str
-    card_name: str
-    device_index: int
-    device_name: str
-
-    @property
-    def alsa_device(self) -> str:
-        """The device string accepted by ``-D`` and ALSA's ``plughw`` plugin."""
-
-        return f"plughw:CARD={self.card_id},DEV={self.device_index}"
-
-    def __str__(self) -> str:
-        return (
-            f"card {self.card_index}: {self.card_id} [{self.card_name}], "
-            f"device {self.device_index}: {self.device_name}"
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +134,7 @@ class PlaybackStream(Protocol):
 
 
 class _ProcessAudio:
-    """Shared subprocess lifecycle for the ALSA and PipeWire backends.
+    """Shared subprocess lifecycle for the PipeWire backend.
 
     Subclasses provide the capture/playback commands and the user-facing names
     used in error messages. The capture process is single-instance. ``play``
@@ -579,146 +541,6 @@ class _SubprocessPlayback:
                     process.wait(timeout=_STOP_TIMEOUT_S)
                 except subprocess.TimeoutExpired:
                     logger.warning("%s did not exit after SIGKILL", self._audio._playback_tool)
-
-
-class GadgetAudio(_ProcessAudio):
-    """Capture and playback through the USB gadget's ALSA card.
-
-    A single capture process is used. ``frames()`` starts it on demand and stops
-    it when the generator is closed. Playback is one ``aplay`` process per
-    utterance for ``play()``, or a reusable streaming process for
-    ``start_playback()``. Do not call :meth:`start` or :meth:`stop` from another
-    thread while ``frames()`` is running.
-    """
-
-    _capture_tool = "arecord"
-    _playback_tool = "aplay"
-    _tool_hint = "install ALSA utilities with `sudo apt install alsa-utils`"
-    _capture_exit_hint = "run `arecord -l` and check the configured card"
-    _no_audio_hint = (
-        "check the card id with `arecord -l` and verify that the USB gadget is enumerated"
-    )
-
-    def __init__(
-        self,
-        card: str,
-        device: int = 0,
-        sample_rate: int = 16_000,
-        channels: int = 1,
-        frame_ms: int = 20,
-        *,
-        arecord: str = "arecord",
-        aplay: str = "aplay",
-    ) -> None:
-        if not card:
-            raise ValueError("audio card must not be empty")
-        if device < 0:
-            raise ValueError(f"audio device must be >= 0 (got {device})")
-        super().__init__(sample_rate=sample_rate, channels=channels, frame_ms=frame_ms)
-        self._card = card
-        self._device = device
-        self._arecord = arecord
-        self._aplay = aplay
-
-    @property
-    def card(self) -> str:
-        return self._card
-
-    @property
-    def device(self) -> int:
-        return self._device
-
-    @property
-    def alsa_device(self) -> str:
-        """The ALSA device string used for capture and playback."""
-
-        return f"plughw:CARD={self._card},DEV={self._device}"
-
-    @property
-    def description(self) -> str:
-        return self.alsa_device
-
-    def _capture_command(self) -> list[str]:
-        return [
-            self._arecord,
-            "-q",
-            "-D",
-            self.alsa_device,
-            "-f",
-            "S16_LE",
-            "-r",
-            str(self.sample_rate),
-            "-c",
-            str(self.channels),
-            "-t",
-            "raw",
-        ]
-
-    def _playback_command(self) -> list[str]:
-        return [
-            self._aplay,
-            "-q",
-            "-D",
-            self.alsa_device,
-            "-f",
-            "S16_LE",
-            "-r",
-            str(self.sample_rate),
-            "-c",
-            str(self.channels),
-            "-t",
-            "raw",
-        ]
-
-    @staticmethod
-    def list_cards(arecord: str = "arecord") -> list[CaptureDevice]:
-        """Parse ``arecord -l`` into capture devices.
-
-        Raises:
-            AudioError: If ``arecord`` is missing, times out, or exits non-zero.
-        """
-
-        env = {**os.environ, "LC_ALL": "C"}
-        try:
-            result = subprocess.run(
-                [arecord, "-l"],
-                capture_output=True,
-                text=True,
-                timeout=5.0,
-                check=False,
-                env=env,
-            )
-        except FileNotFoundError as exc:
-            raise AudioError(
-                "arecord was not found; install ALSA utilities with `sudo apt install alsa-utils`"
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise AudioError("`arecord -l` timed out") from exc
-        except OSError as exc:
-            raise AudioError(f"cannot run arecord: {exc}") from exc
-
-        if result.returncode != 0:
-            detail = result.stderr.strip()
-            message = f"`arecord -l` exited with status {result.returncode}"
-            if detail:
-                message = f"{message}: {detail}"
-            raise AudioError(message)
-
-        devices: list[CaptureDevice] = []
-        for line in result.stdout.splitlines():
-            match = _CARD_LINE.match(line)
-            if match is None:
-                continue
-            devices.append(
-                CaptureDevice(
-                    card_index=int(match.group("card_index")),
-                    card_id=match.group("card_id"),
-                    card_name=match.group("card_name").strip(),
-                    device_index=int(match.group("device_index")),
-                    device_name=match.group("device_name").strip(),
-                )
-            )
-        return devices
 
 
 class PipeWireAudio(_ProcessAudio):

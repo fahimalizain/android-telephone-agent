@@ -1,8 +1,8 @@
 """Poll the dial helper and answer inbound calls with the voice agent.
 
 The helper on Phone A is the signaling path. It exposes ``GET /state`` and
-``POST /answer``; Bluetooth HFP and the USB gadget carry only audio, so there is
-no ringing event or caller ID in user space. This module polls the helper once
+``POST /answer``; Bluetooth HFP carries only audio, so there is no ringing
+event or caller ID in user space. This module polls the helper once
 per :attr:`InboundConfig.poll_interval_s`, answers a ringing call, and then runs
 exactly one voice session at a time.
 

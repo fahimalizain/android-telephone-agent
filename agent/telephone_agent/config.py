@@ -9,8 +9,9 @@ variables override both. Nested overrides use a double underscore::
 
 The loader is intentionally strict. Unknown keys and unknown environment
 variables are errors rather than silent no-ops, because a typo in a token or a
-card name is otherwise difficult to diagnose. Validation of sample rates, frame
-alignment, URLs, and E.164 numbers happens here, before a call is placed.
+Bluetooth address is otherwise difficult to diagnose. Validation of sample
+rates, frame alignment, URLs, and E.164 numbers happens here, before a call is
+placed.
 """
 
 from __future__ import annotations
@@ -43,7 +44,6 @@ __all__ = [
 
 _ENV_PREFIX = "TELEPHONE_AGENT_"
 _E164_PATTERN = re.compile(r"^\+[1-9]\d{6,14}$")
-_CARD_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 _BLUETOOTH_ADDRESS = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 
 _T = TypeVar("_T")
@@ -55,29 +55,20 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class AudioConfig:
-    """Audio transport and processing settings.
+    """Bluetooth HFP audio transport and processing settings.
 
-    ``backend = "alsa"`` selects the USB Audio Class gadget and requires
-    ``card``/``device``. ``backend = "pipewire"`` selects Bluetooth HFP through
-    PipeWire and requires ``bluetooth_address``; the SCO nodes are present only
-    while a call is active, so ``node_timeout_s`` bounds the wait for them.
-
-    For the USB gadget, ``card`` is the ALSA card id shown by ``arecord -l``
-    (the token after ``card N:``), not the bracketed human-readable description.
-    The gadget itself runs at 48 kHz stereo; the default here is 16 kHz mono
-    because ALSA's ``plughw`` plugin resamples and the network codec cannot use
-    the extra bandwidth. The Bluetooth HFP SCO link is 8 kHz (CVSD) or 16 kHz
-    (mSBC); the default processing rate matches the wideband case.
+    ``bluetooth_address`` is Phone A's Bluetooth address; it is required. The
+    HFP SCO nodes are present only while a call is active, so ``node_timeout_s``
+    bounds the wait for them. The SCO link is 8 kHz (CVSD) or 16 kHz (mSBC); the
+    default processing rate matches the wideband case, and PipeWire resamples
+    narrowband links to it.
     """
 
-    card: str = ""
-    device: int = 0
+    bluetooth_address: str = ""
+    node_timeout_s: float = 30.0
     sample_rate: int = 16_000
     channels: int = 1
     frame_ms: int = 20
-    backend: str = "alsa"
-    bluetooth_address: str = ""
-    node_timeout_s: float = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,36 +334,16 @@ def _mask_sensitive(value: str) -> str:
 
 
 def _validate_audio(audio: AudioConfig) -> None:
-    if audio.backend not in {"alsa", "pipewire"}:
+    if not audio.bluetooth_address:
         raise ConfigError(
-            f"audio.backend must be 'alsa' or 'pipewire' (got {audio.backend!r}); "
-            "'alsa' is the USB gadget and 'pipewire' is Bluetooth HFP"
+            "audio.bluetooth_address is required; set it to Phone A's Bluetooth "
+            "address, for example 'AA:BB:CC:DD:EE:FF'"
         )
-    if audio.backend == "alsa":
-        if not audio.card:
-            raise ConfigError(
-                "audio.card is required when audio.backend = 'alsa'; run `arecord -l` "
-                "and set [audio].card to the gadget card id (the token after 'card N:')"
-            )
-        if not _CARD_PATTERN.fullmatch(audio.card):
-            raise ConfigError(
-                f"audio.card must contain only letters, digits, '_', '-', or '.' "
-                f"(got {audio.card!r})"
-            )
-    else:
-        if not audio.bluetooth_address:
-            raise ConfigError(
-                "audio.bluetooth_address is required when audio.backend = 'pipewire'; "
-                "set it to Phone A's Bluetooth address, for example "
-                "'AA:BB:CC:DD:EE:FF'"
-            )
-        if not _BLUETOOTH_ADDRESS.fullmatch(audio.bluetooth_address):
-            raise ConfigError(
-                "audio.bluetooth_address must be six colon-separated hex octets, "
-                f"for example 'AA:BB:CC:DD:EE:FF' (got {audio.bluetooth_address!r})"
-            )
-    if audio.device < 0:
-        raise ConfigError(f"audio.device must be >= 0 (got {audio.device})")
+    if not _BLUETOOTH_ADDRESS.fullmatch(audio.bluetooth_address):
+        raise ConfigError(
+            "audio.bluetooth_address must be six colon-separated hex octets, "
+            f"for example 'AA:BB:CC:DD:EE:FF' (got {audio.bluetooth_address!r})"
+        )
     if not math.isfinite(audio.node_timeout_s) or audio.node_timeout_s <= 0:
         raise ConfigError(
             f"audio.node_timeout_s must be a positive number (got {audio.node_timeout_s})"
@@ -384,7 +355,7 @@ def _validate_audio(audio: AudioConfig) -> None:
     if audio.channels != 1:
         raise ConfigError(
             "audio.channels must be 1 in v0; the pipeline processes mono and the "
-            "ALSA/PipeWire layer downmixes the gadget or SCO stream"
+            "PipeWire layer downmixes the SCO stream"
         )
     if not 1 <= audio.frame_ms <= 1_000:
         raise ConfigError(f"audio.frame_ms must be between 1 and 1000 (got {audio.frame_ms})")

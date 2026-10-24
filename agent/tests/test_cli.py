@@ -27,13 +27,7 @@ from telephone_agent.__main__ import (
     build_parser,
     main,
 )
-from telephone_agent.audio import (
-    AudioError,
-    AudioStats,
-    CaptureDevice,
-    GadgetAudio,
-    PipeWireAudio,
-)
+from telephone_agent.audio import AudioError, AudioStats, PipeWireAudio
 from telephone_agent.config import (
     AgentConfig,
     AudioConfig,
@@ -85,20 +79,9 @@ def test_dialer_from_config_uses_dialer_section() -> None:
     assert dialer.retries == 1
 
 
-def test_audio_from_config_builds_the_usb_gadget_backend() -> None:
-    config = Config(audio=AudioConfig(backend="alsa", card="UAC1Gadget", device=1))
-
-    audio = _audio_from_config(config)
-
-    assert isinstance(audio, GadgetAudio)
-    assert audio.card == "UAC1Gadget"
-    assert audio.device == 1
-
-
 def test_audio_from_config_builds_the_bluetooth_backend() -> None:
     config = Config(
         audio=AudioConfig(
-            backend="pipewire",
             bluetooth_address="AA:BB:CC:DD:EE:FF",
             node_timeout_s=12.0,
         )
@@ -120,7 +103,6 @@ def test_doctor_bluetooth_reports_active_sco_nodes(
         tmp_path,
         f"""
 [audio]
-backend = "pipewire"
 bluetooth_address = "{ADDRESS}"
 
 [dialer]
@@ -160,7 +142,6 @@ def test_doctor_bluetooth_idle_is_not_a_failure(
         tmp_path,
         f"""
 [audio]
-backend = "pipewire"
 bluetooth_address = "{ADDRESS}"
 
 [dialer]
@@ -194,7 +175,6 @@ def test_doctor_bluetooth_incomplete_sco_pair_is_a_failure(
         tmp_path,
         f"""
 [audio]
-backend = "pipewire"
 bluetooth_address = "{ADDRESS}"
 
 [dialer]
@@ -230,7 +210,6 @@ def test_doctor_bluetooth_pw_dump_failure_is_a_failure(
         tmp_path,
         f"""
 [audio]
-backend = "pipewire"
 bluetooth_address = "{ADDRESS}"
 
 [dialer]
@@ -254,39 +233,6 @@ token = "test-token"
     captured = capsys.readouterr()
     assert "audio: FAIL: pw-dump is not running" in captured.err
     assert "doctor: FAIL" in captured.out
-
-
-def test_doctor_alsa_reports_capture_card(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    path = _write_config(
-        tmp_path,
-        """
-[audio]
-card = "UAC1Gadget"
-
-[dialer]
-url = "http://127.0.0.1:8765"
-token = "test-token"
-""",
-    )
-    monkeypatch.setattr(
-        "telephone_agent.__main__.GadgetAudio.list_cards",
-        lambda: [CaptureDevice(0, "UAC1Gadget", "USB Audio", 0, "USB Audio")],
-    )
-    monkeypatch.setattr(
-        "telephone_agent.__main__._dialer_from_config",
-        lambda _config: FakeDialer(),
-    )
-
-    assert _cmd_doctor(argparse.Namespace(config=str(path))) == 0
-
-    output = capsys.readouterr().out
-    assert "audio backend: alsa" in output
-    assert "capture devices:" in output
-    assert "doctor: ok" in output
 
 
 def test_check_pipewire_tools_reports_missing_binaries(
@@ -330,7 +276,7 @@ def test_selftest_exit_code_tracks_digital_silence(
         tmp_path,
         """
 [audio]
-card = "UAC1Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8765"
@@ -363,7 +309,7 @@ def _serve_config(
 phone_number = "+15555550100"
 
 [audio]
-card = "UAC1Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8765"
@@ -515,7 +461,7 @@ def test_build_session_factory_wires_a_deliberative_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = Config(
-        audio=AudioConfig(card="UAC1Gadget"),
+        audio=AudioConfig(bluetooth_address=ADDRESS),
         dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
         agent=AgentConfig(consult_timeout_s=3.5, holding_phrase="Hold on."),
     )
@@ -571,7 +517,7 @@ def test_build_session_factory_uses_the_configured_call_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = Config(
-        audio=AudioConfig(card="UAC1Gadget"),
+        audio=AudioConfig(bluetooth_address=ADDRESS),
         dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
         agent=AgentConfig(max_call_seconds=120),
     )
@@ -603,7 +549,7 @@ def test_build_session_factory_wires_the_realtime_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = Config(
-        audio=AudioConfig(card="UAC1Gadget"),
+        audio=AudioConfig(bluetooth_address=ADDRESS),
         dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
         realtime=RealtimeConfig(kind="grok"),
         agent=AgentConfig(consult_timeout_s=3.5, holding_phrase="Hold on."),
@@ -663,7 +609,7 @@ def test_build_session_factory_records_transcripts_and_forwards_events(
 ) -> None:
     directory = tmp_path / "transcripts"
     config = Config(
-        audio=AudioConfig(card="UAC1Gadget"),
+        audio=AudioConfig(bluetooth_address=ADDRESS),
         dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
         transcript=TranscriptConfig(enabled=True, directory=str(directory)),
     )
@@ -727,7 +673,7 @@ def test_build_session_factory_records_transcripts_and_forwards_events(
     assert records[0]["call_id"] == "call-1234567890"
     assert records[0]["number"] == "+15555550100"
     assert records[0]["objective"] == "Confirm the appointment."
-    assert records[0]["audio_backend"] == "alsa"
+    assert records[0]["audio_backend"] == "pipewire"
     assert records[0]["realtime_kind"] == "off"
     assert "realtime_model" not in records[0]
     assert records[1]["text"] == "Hello?"
@@ -747,7 +693,7 @@ def test_cmd_run_records_transcript_and_passes_the_callback(
 phone_number = "+15555550100"
 
 [audio]
-card = "UAC1Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8765"
@@ -803,7 +749,7 @@ directory = "{directory}"
         "call_end",
     ]
     assert records[0]["number"] == "+15555550100"
-    assert records[0]["audio_backend"] == "alsa"
+    assert records[0]["audio_backend"] == "pipewire"
     assert records[0]["realtime_kind"] == "grok"
     assert records[0]["realtime_model"] == "grok-voice-3.0"
     assert records[0]["realtime_voice"] == "ara"
@@ -830,7 +776,7 @@ def test_inbound_requires_the_grok_realtime_adapter(tmp_path: Path) -> None:
         tmp_path,
         """
 [audio]
-card = "UAC1Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8765"
@@ -851,7 +797,7 @@ def test_inbound_wires_the_watcher_with_config_and_once(
         tmp_path,
         """
 [audio]
-card = "UAC1Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8765"
@@ -895,7 +841,7 @@ def test_inbound_session_factory_uses_an_inbound_transcript_and_realtime_session
 ) -> None:
     directory = tmp_path / "transcripts"
     config = Config(
-        audio=AudioConfig(card="UAC1Gadget"),
+        audio=AudioConfig(bluetooth_address=ADDRESS),
         dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
         realtime=RealtimeConfig(kind="grok"),
         transcript=TranscriptConfig(enabled=True, directory=str(directory)),
@@ -954,7 +900,7 @@ def test_doctor_realtime_reports_missing_key(
         tmp_path,
         """
 [audio]
-card = "UAC1Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8765"
@@ -964,7 +910,11 @@ token = "test-token"
 kind = "grok"
 """,
     )
-    monkeypatch.setattr("telephone_agent.__main__._check_alsa_capture", lambda _card: True)
+    monkeypatch.setattr("telephone_agent.__main__._check_pipewire_tools", lambda: True)
+    monkeypatch.setattr(
+        "telephone_agent.__main__.PipeWireAudio.find_sco_nodes",
+        lambda *_args, **_kwargs: (None, None),
+    )
     monkeypatch.setattr(
         "telephone_agent.__main__._dialer_from_config",
         lambda _config: FakeDialer(),
@@ -989,7 +939,7 @@ def test_doctor_realtime_reports_configured_key(
         tmp_path,
         """
 [audio]
-card = "UAC1Gadget"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
 
 [dialer]
 url = "http://127.0.0.1:8765"
@@ -999,7 +949,11 @@ token = "test-token"
 kind = "grok"
 """,
     )
-    monkeypatch.setattr("telephone_agent.__main__._check_alsa_capture", lambda _card: True)
+    monkeypatch.setattr("telephone_agent.__main__._check_pipewire_tools", lambda: True)
+    monkeypatch.setattr(
+        "telephone_agent.__main__.PipeWireAudio.find_sco_nodes",
+        lambda *_args, **_kwargs: (None, None),
+    )
     monkeypatch.setattr(
         "telephone_agent.__main__._dialer_from_config",
         lambda _config: FakeDialer(),

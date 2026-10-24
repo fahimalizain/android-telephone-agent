@@ -179,7 +179,7 @@ class CallSession:
     """Run one outbound call from dialing through hangup.
 
     Args:
-        audio: Call audio backend (USB gadget or Bluetooth HFP).
+        audio: Call audio backend (Bluetooth HFP).
         dialer: Helper client that places and ends the call.
         brain: Text-in, text-out conversation brain. Mutually exclusive with
             *deliberative*.
@@ -494,7 +494,7 @@ class CallSession:
             logger.warning("synthesizer returned empty PCM; reply was not played")
             return
 
-        # TODO(v0.2): barge-in. `play()` blocks until aplay exits, so capture is
+        # TODO(v0.2): barge-in. `play()` blocks until pw-play exits, so capture is
         # not drained while the agent talks. The extension point is here:
         #  1. start playback in a worker thread or an incremental sink;
         #  2. keep consuming `frames()` and feed the endpointer;

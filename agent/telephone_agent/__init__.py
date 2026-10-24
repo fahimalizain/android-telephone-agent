@@ -9,7 +9,7 @@ dependencies.
 
 from __future__ import annotations
 
-from .audio import AudioDevice, AudioError, AudioStats, CaptureDevice, GadgetAudio, PipeWireAudio
+from .audio import AudioDevice, AudioError, AudioStats, PipeWireAudio
 from .brain import (
     DEFAULT_SYSTEM_PROMPT,
     Brain,
@@ -60,7 +60,6 @@ __all__ = [
     "CallResult",
     "CallSession",
     "CallState",
-    "CaptureDevice",
     "Config",
     "ConfigError",
     "Dialer",
@@ -68,7 +67,6 @@ __all__ = [
     "DialerError",
     "EchoBrain",
     "Endpointer",
-    "GadgetAudio",
     "GrokRealtimeError",
     "GrokRealtimeSession",
     "HttpBrain",
