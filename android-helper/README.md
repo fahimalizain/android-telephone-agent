@@ -11,31 +11,40 @@ files to paste into a new project.
 
 ## What it is
 
-`DialService.kt` is a foreground Android service that listens on `0.0.0.0:8765` and
-places a call when it receives an authenticated `POST /call`. It exists because Phone A
+`DialService.kt` is a foreground Android service that listens on `0.0.0.0:8765`, places
+a call when it receives an authenticated `POST /call`, reports cellular call state on
+`GET /state`, and answers a ringing call on `POST /answer`. It exists because Phone A
 is the USB host for the Pi's audio gadget, so adb over USB is unavailable during normal
 operation.
 
 It provides:
 
 - `GET /health`, an unauthenticated liveness and device/SIM check.
+- `GET /state`, an authenticated, pollable call-phase sample: `idle`, `ringing`,
+  `offhook`, or `unknown`.
+- `POST /answer`, authenticated, to answer a ringing cellular call.
 - `POST /call` with a bearer token and an E.164 number.
 - `POST /hangup`, best effort, because Android restricts `endCall()` for non-dialer apps.
 
 Before refusing a call or reporting a failed hangup, the helper checks
 `TelecomManager.isInCall()`. That lets it clear a stale ten-minute window when the remote
-party ended the call, instead of requiring a service restart.
+party ended the call, instead of requiring a service restart. The same check blocks a
+`/call` while an inbound call is ringing or active.
 
-It does not touch call audio. Audio is carried by the Pi's USB Audio Class gadget.
+It does not touch call audio. Audio is carried separately by the Pi's USB Audio Class
+gadget or by Bluetooth HFP through PipeWire. The helper is the call-state and signaling
+path; Bluetooth/PipeWire carries audio only, and HFP SCO nodes appear after a call is
+answered, not while it is ringing.
 
 ## Status
 
 The project builds and produces an installable APK. It has been smoke-tested on an
 Android 36 emulator: service startup, `/health`, bearer authentication, input validation,
-the call window, hangup responses, and the signed release APK. It has not been validated
-on a physical phone or against the USB audio hardware in this repository yet. Treat
-permission prompts, real SIM-label routing, boot startup, actual hangup, and vendor
-battery management as unverified until you test them on your device.
+the call window, hangup responses, and the signed release APK. The `/state` and `/answer`
+paths compile and are covered by the build, but they have not been exercised against a
+real inbound cellular call or a physical phone. Treat permission prompts, real SIM-label
+routing, boot startup, actual hangup, answering from a locked screen, and vendor battery
+management as unverified until you test them on your device.
 
 ## Project layout
 
@@ -183,9 +192,10 @@ If the property already exists and you are rotating the token, edit the line by 
 rather than running that command again.
 
 If `dialHelperToken` is absent or blank, the build does not fail. It embeds the
-placeholder `REPLACE_WITH_32_BYTE_RANDOM_TOKEN`, and the service answers `POST /call` and
-`POST /hangup` with `503 {"error":"token not configured"}`. `GET /health` still works, so
-you can use it to confirm the service is up before fixing the build.
+placeholder `REPLACE_WITH_32_BYTE_RANDOM_TOKEN`, and the service answers `POST /call`,
+`POST /hangup`, `GET /state`, and `POST /answer` with
+`503 {"error":"token not configured"}`. `GET /health` still works, so you can use it to
+confirm the service is up before fixing the build.
 
 The Pi needs the same token in `[dialer] token` in `config/config.toml`, or in the
 `TELEPHONE_AGENT_DIALER__TOKEN` environment variable. Never commit the real
@@ -289,10 +299,13 @@ adb shell am start-foreground-service -n dev.example.dialhelper/.DialService
 ```
 
 `POST_NOTIFICATIONS` exists only on Android 13 and newer; skip that grant on older
-builds. The other four permissions are required. `READ_PHONE_STATE` is used to enumerate
-phone accounts; Android 14 and newer gate `TelecomManager.getPhoneAccount()` behind
-`READ_PHONE_NUMBERS`, so the helper needs that permission to read the SIM/account label.
-Neither permission grants call audio or phone-number access to the helper's API.
+builds. The other four permissions are required. `READ_PHONE_STATE` is used to read
+`TelephonyManager.callState` and to enumerate phone accounts; Android 14 and newer gate
+`TelecomManager.getPhoneAccount()` behind `READ_PHONE_NUMBERS`, so the helper needs that
+permission to read the SIM/account label. `ANSWER_PHONE_CALLS` is used by `/answer` and
+best-effort `/hangup`. None of these permissions grants call audio or phone-number access
+to the helper's API, and the helper does not request `READ_CALL_LOG`; `/state` contains no
+caller ID.
 
 `DialService` is exported so adb can start it during provisioning. It ignores intent
 data; the only control surface is the token-protected LAN API.
@@ -326,15 +339,30 @@ request. All responses are JSON.
 | Method | Path | Authentication | Body |
 |---|---|---|---|
 | `GET` | `/health` | None | None |
+| `GET` | `/state` | `Authorization: Bearer <token>` | None |
+| `POST` | `/answer` | `Authorization: Bearer <token>` | None |
 | `POST` | `/call` | `Authorization: Bearer <token>` | `{"number":"+919876543210"}` |
 | `POST` | `/hangup` | `Authorization: Bearer <token>` | None |
 
 Numbers must match `^\+[1-9][0-9]{6,14}$` and be normalized on the Pi. `202` on `/call`
-means Telecom accepted the request, not that the call connected. A second call inside
-the ten-minute active window returns `409` only while `TelecomManager.isInCall()` reports
-a call, or when that state cannot be read; if no call is active, the helper clears the
-stale window and dials. A wrong or missing token returns `401`; a missing `CALL_PHONE`
-permission returns `403` (not retried by the Pi client).
+means Telecom accepted the request, not that the call connected. A `/call` while
+`TelecomManager.isInCall()` reports any ringing or active call returns `409`; that includes
+an inbound call this helper did not place. Inside the ten-minute active window, a `409`
+also applies when the call state cannot be read, but if Telecom reports no call the stale
+window is cleared and the helper dials. A wrong or missing token returns `401`; a missing
+`CALL_PHONE` permission returns `403` (not retried by the Pi client).
+
+`GET /state` returns `{"state":"idle"}`, `{"state":"ringing"}`, `{"state":"offhook"}`, or
+`{"state":"unknown"}`. It uses `TelephonyManager.callState` and falls back to
+`TelecomManager.isInCall()` for a call on another subscription. It is safe to poll about
+once per second and never includes caller ID or a phone number.
+
+`POST /answer` returns `202 {"state":"answering"}` when Telecom accepted the answer
+request, `409 {"error":"no ringing call"}` when `/state` is not ringing,
+`403 {"error":"answer permission denied"}` when `ANSWER_PHONE_CALLS` is missing or the
+platform throws `SecurityException`, and `500 {"error":"answer failed"}` for another
+`RuntimeException`. `202` does not prove the call connected or that audio exists yet.
+`/answer` records the call in the same window as `/call`, so `/hangup` can end it.
 
 Hangup is best effort. `202 {"state":"hangup-requested"}` means no call is active after
 the request: `endCall()` succeeded, or it returned `false` and `isInCall()` reported no
@@ -356,6 +384,12 @@ export DIAL_TOKEN="$(cat /scratch/android/dial-helper/token)"
 
 curl -sS "http://$PHONE_IP:8765/health"
 
+curl -i -sS "http://$PHONE_IP:8765/state" \
+  -H "Authorization: Bearer $DIAL_TOKEN"
+
+curl -i -sS -X POST "http://$PHONE_IP:8765/answer" \
+  -H "Authorization: Bearer $DIAL_TOKEN"
+
 curl -i -sS -X POST "http://$PHONE_IP:8765/call" \
   -H "Authorization: Bearer $DIAL_TOKEN" \
   -H "Content-Type: application/json" \
@@ -367,13 +401,16 @@ curl -i -sS -X POST "http://$PHONE_IP:8765/hangup" \
 
 A wrong token must return `401`. A call placed while the previous call is still active
 inside the ten-minute window must return `409`; if the remote party already hung up, the
-same request is accepted and applies the stale-window recovery. Watch the log:
+same request is accepted and applies the stale-window recovery. `/state` while idle must
+be `idle`, and `/answer` without a ringing call must be `409`; both require a real inbound
+call for a full test, so do not automate a live answer in CI. Watch the log:
 
 ```sh
 adb logcat -s DialHelper
 ```
 
-The log must never contain the destination number or the token.
+The log may contain `inbound call answered`, but must never contain a caller, the
+destination number, or the token.
 
 ## Troubleshooting
 
@@ -387,6 +424,11 @@ The log must never contain the destination number or the token.
 | Connection refused | Service not running, wrong IP, or port 8765 blocked |
 | `503 no SIM available` | `READ_PHONE_STATE` or `READ_PHONE_NUMBERS` missing, no account matches `AGENT_SIM_LABEL`, or the label is blank on dual SIM |
 | `403 call permission denied` | `CALL_PHONE` not granted |
+| `403 answer permission denied` | `ANSWER_PHONE_CALLS` not granted, or `acceptRingingCall()` was refused by the platform |
+| `409 no ringing call` | `/answer` was called while `/state` was not `ringing`, or the caller hung up first |
+| `500 answer failed` | `acceptRingingCall()` threw a non-security platform exception |
+| `/state` returns `unknown` | The platform refused the call-state query; check `READ_PHONE_STATE` and vendor restrictions |
+| `/answer` returns `202` but the call is not answered | Vendor build restricts `acceptRingingCall()` for non-dialer apps, or the phone is locked; test on the device |
 | SIM picker on the phone | The configured label did not match a call-capable account; read `sim` from `/health` and correct `dialHelperSimLabel` |
 | `202 hangup-unavailable` | `endCall()` refused by the platform and a call may still be active, or call state was unreadable; see `docs/dial-helper.md` |
 | Service disappears | Samsung sleeping apps or battery optimization; re-check the settings |
@@ -396,15 +438,18 @@ The log must never contain the destination number or the token.
 
 This is a reference, not a product. It lacks TLS, rate limiting, replay protection, a
 real HTTP server, continuous call-state tracking, and secure token storage. Call state is
-sampled with `TelecomManager.isInCall()` only when `/call` or `/hangup` needs it; there is
-no callback. The HTTP parser handles one request per connection, caps line and body size,
-and closes the socket, but it has not been fuzzed. The foreground service can still be
-killed by vendor battery management. `endCall()` is deprecated and restricted, so hangup
-may not work.
+sampled on each `/state` request with `TelephonyManager.callState` and
+`TelecomManager.isInCall()`; there is no callback or push. A call on another subscription
+is visible only as `offhook` and cannot be answered. The `/state` response has no caller
+ID because the app does not hold `READ_CALL_LOG`. The HTTP parser handles one request per
+connection, caps line and body size, and closes the socket, but it has not been fuzzed.
+The foreground service can still be killed by vendor battery management.
+`acceptRingingCall()` and `endCall()` are deprecated and restricted, so answering and
+hangup may not work on every vendor build.
 
-The APK builds, but no physical-device or end-to-end audio validation has been recorded.
-SIM labels, locked-screen dialing, boot startup, and vendor-specific permission behavior
-must be tested on the target phone before relying on them.
+The APK builds, but no physical-device inbound-call or end-to-end audio validation has
+been recorded. SIM labels, locked-screen answering, boot startup, and vendor-specific
+permission behavior must be tested on the target phone before relying on them.
 
 For the protocol, threat model, and provisioning details, read `docs/dial-helper.md` and
 `docs/android-setup.md`.

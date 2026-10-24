@@ -18,6 +18,7 @@ import android.os.SystemClock
 import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
+import android.telephony.TelephonyManager
 import android.util.Log
 import org.json.JSONException
 import org.json.JSONObject
@@ -355,7 +356,26 @@ class DialService : Service() {
         }
       }
 
-      path == "/call" || path == "/hangup" || path == "/health" ->
+      // GET with no body; safe to poll. The response deliberately omits any
+      // caller identity because the app does not hold READ_CALL_LOG.
+      method == "GET" && path == "/state" -> {
+        when {
+          !tokenConfigured() -> Response(503, errorBody("token not configured"))
+          !authorized(headers) -> Response(401, errorBody("unauthorized"))
+          else -> Response(200, JSONObject().put("state", callState()))
+        }
+      }
+
+      method == "POST" && path == "/answer" -> {
+        when {
+          !tokenConfigured() -> Response(503, errorBody("token not configured"))
+          !authorized(headers) -> Response(401, errorBody("unauthorized"))
+          else -> answer()
+        }
+      }
+
+      path == "/call" || path == "/hangup" || path == "/health" ||
+        path == "/state" || path == "/answer" ->
         Response(405, errorBody("method not allowed"))
 
       else -> Response(404, errorBody("not found"))
@@ -411,6 +431,14 @@ class DialService : Service() {
       }
 
       val now = SystemClock.elapsedRealtime()
+      // Refuse an outbound call while any call is ringing or active, even when
+      // this helper did not place it (for example an unanswered inbound call).
+      // isCallActive() is null when the platform will not say; in that case the
+      // window check below still protects calls this helper placed.
+      if (isCallActive() == true) {
+        return Response(409, errorBody("call already active"))
+      }
+
       if (lastCallAt != 0L && now - lastCallAt < CALL_WINDOW_MS) {
         // The remote party can end the call without this service noticing, so
         // an in-memory window alone would block every later call. Clear it only
@@ -505,6 +533,73 @@ class DialService : Service() {
         Response(202, JSONObject().put("state", "hangup-unavailable"))
       }
     }
+  }
+
+  /**
+   * Answers the currently ringing call with TelecomManager.acceptRingingCall().
+   *
+   * The ringing check happens before the permission check so a poll that races
+   * with the caller hanging up gets 409 rather than a misleading permission
+   * error. acceptRingingCall() is best effort for non-dialer apps on some vendor
+   * builds; a SecurityException is reported as a permission problem and any
+   * other RuntimeException as a failed answer.
+   */
+  @Suppress("DEPRECATION")
+  private fun answer(): Response {
+    synchronized(callLock) {
+      if (callState() != "ringing") {
+        return Response(409, errorBody("no ringing call"))
+      }
+
+      if (checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) !=
+        PackageManager.PERMISSION_GRANTED
+      ) {
+        Log.w(TAG, "answer denied; ANSWER_PHONE_CALLS not granted")
+        return Response(403, errorBody("answer permission denied"))
+      }
+
+      return try {
+        telecom.acceptRingingCall()
+        // Treat the inbound call like one this helper owns so /hangup can end
+        // it and a following /call is guarded by the active window.
+        lastCallAt = SystemClock.elapsedRealtime()
+        lastHangupAt = 0L
+        // Never log the caller or any number; the helper has no caller ID.
+        Log.i(TAG, "inbound call answered")
+        Response(202, JSONObject().put("state", "answering"))
+      } catch (e: SecurityException) {
+        Log.w(TAG, "acceptRingingCall denied: ${e.javaClass.simpleName}")
+        Response(403, errorBody("answer permission denied"))
+      } catch (e: RuntimeException) {
+        Log.w(TAG, "acceptRingingCall failed: ${e.javaClass.simpleName}")
+        Response(500, errorBody("answer failed"))
+      }
+    }
+  }
+
+  /**
+   * Polls the platform call state without a PhoneStateListener.
+   *
+   * TelephonyManager.callState requires READ_PHONE_STATE. It may not report a
+   * call on another subscription, and TelecomManager.isInCall covers calls on
+   * another subscription or outside this app, so an idle TelephonyManager plus
+   * an in-call Telecom is still reported as offhook. A refused query becomes
+   * "unknown" instead of failing the HTTP request.
+   */
+  @Suppress("DEPRECATION")
+  private fun callState(): String = try {
+    val telephony = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+    when (telephony.callState) {
+      TelephonyManager.CALL_STATE_RINGING -> "ringing"
+      TelephonyManager.CALL_STATE_OFFHOOK -> "offhook"
+      else -> if (telecom.isInCall) "offhook" else "idle"
+    }
+  } catch (e: SecurityException) {
+    Log.w(TAG, "call state unavailable: ${e.javaClass.simpleName}")
+    "unknown"
+  } catch (e: RuntimeException) {
+    Log.w(TAG, "call state unavailable: ${e.javaClass.simpleName}")
+    "unknown"
   }
 
   /**
