@@ -381,7 +381,11 @@ class DialService : Service() {
       else -> Response(404, errorBody("not found"))
     }
 
-    Log.i(TAG, "event=request method=$method path=$path status=${response.code}")
+    // /state is polled once per second. Do not log successful polls: at that
+    // rate they would flood logcat and hide call events.
+    if (path != "/state" || response.code != 200) {
+      Log.i(TAG, "event=request method=$method path=$path status=${response.code}")
+    }
     writeResponse(output, response.code, response.body)
   }
 
