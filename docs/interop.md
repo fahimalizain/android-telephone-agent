@@ -483,15 +483,6 @@ That message moves the task to `TASK_STATE_WORKING` and resumes observation; it 
 `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, or `TASK_STATE_CANCELED` when the call does.
 This is a v1 limitation, not a permanent design.
 
-### Known issue with a2a-sdk 1.2.3
-
-The installed `a2a-sdk` 1.2.3 rejects the executor's first status update on a new task
-because no `Task` object has been stored yet. A first `SendMessage` or
-`SendStreamingMessage` returns JSON-RPC error `-32006` with the message
-`Agent should enqueue Task before TaskStatusUpdateEvent event`. The Agent Card, health,
-and authentication checks work. MCP is unaffected. Treat A2A task execution as alpha and
-re-test against the SDK version you pin.
-
 ## Worked example: a mid-call consultation
 
 This path requires `[brain].action_mode = "json"` with `[brain].kind = "http"`. The
@@ -664,7 +655,6 @@ and rate limits exist. See [SECURITY.md](../SECURITY.md).
 | Call ends by silence, max duration, or audio end | The task becomes `completed` unless hangup cannot be confirmed; the result reason records `silence_timeout`, `max_duration`, or `audio_ended`. |
 | Restart | In-memory tasks are lost, and an active call may be orphaned until the remote party or carrier ends it. If the A2A task store still has a task but the executor has no call mapping, a later message fails with `This call is no longer active.` |
 | A2A stream drops | The call is unaffected. Poll `GetTask` or subscribe again; there is no durable stream. |
-| A2A new task with a2a-sdk 1.2.3 | Known alpha issue: the first `SendMessage` or `SendStreamingMessage` can return `-32006` before a task is created. See [Known issue](#known-issue-with-a2a-sdk-123). |
 
 Hangup is best effort because Android may not permit `TelecomManager.endCall()` on every
 build. The agent always stops its own audio and closes the session; the remote side or
@@ -828,9 +818,9 @@ alpha issue described above.
    `transcript` and `reply` records do contain text. Confirm no token appears.
 
 8. For A2A, check discovery and authentication as above. A protocol 1.0 client must send
-   `A2A-Version: 1.0` and use the method names in [Methods](#methods). With the
-   installed `a2a-sdk` 1.2.3, expect the known `-32006` task-creation issue; verify the
-   fix against the SDK version you pin before relying on A2A task execution.
+   `A2A-Version: 1.0` and use the method names in [Methods](#methods). Send one
+   `SendMessage` with a text or data part and confirm it returns a task in
+   `TASK_STATE_SUBMITTED` or `TASK_STATE_WORKING`, then reaches a terminal state.
 
 ## Related documents
 

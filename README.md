@@ -29,8 +29,8 @@ unavailable or inconvenient; USB remains the default and canonical path. See the
 [ADR 0006](docs/decisions/0006-use-bluetooth-hfp-audio.md).
 
 Other agents can delegate calls to the runtime over MCP and A2A; one process serves both
-endpoints from a single call queue. MCP is usable today; A2A task execution is alpha.
-The control plane uses one shared admin-level bearer token and does not yet enforce a
+endpoints from a single call queue. The control plane uses one shared admin-level bearer
+token and does not yet enforce a
 destination allowlist, per-requester budgets, or requester identity, so keep it on a
 trusted network. See the [interoperability guide](docs/interop.md).
 

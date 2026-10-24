@@ -17,13 +17,20 @@ import json
 import uuid
 from collections.abc import Mapping
 
-from a2a.helpers import new_text_message, new_text_part
+from a2a.helpers import new_task, new_text_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
-from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill, Message
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentInterface,
+    AgentSkill,
+    Message,
+    TaskState,
+)
 from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, TransportProtocol
 from google.protobuf import json_format
 from starlette.applications import Starlette
@@ -137,7 +144,24 @@ class CallAgentExecutor(AgentExecutor):
             task = await self._service.submit(objective=objective, number=number)
             call_id = task.id
             self._calls[a2a_task_id] = call_id
-            await updater.submit()
+
+            # The A2A 1.x event consumer requires a Task object before any
+            # TaskStatusUpdateEvent. TaskUpdater only emits status updates, so
+            # publish the initial task explicitly.
+            message = context.message
+            history: list[Message] | None = None
+            if message is not None:
+                message.task_id = a2a_task_id
+                message.context_id = context_id
+                history = [message]
+            await event_queue.enqueue_event(
+                new_task(
+                    task_id=a2a_task_id,
+                    context_id=context_id,
+                    state=TaskState.TASK_STATE_SUBMITTED,
+                    history=history,
+                )
+            )
             await updater.start_work()
             await self._stream(call_id, updater, skip_at=None)
             return

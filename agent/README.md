@@ -311,8 +311,8 @@ budget, rate limit, or queue-depth limit, and no requester identity: any token
 holder can place a call to any valid E.164 number and can list, read, answer, or
 cancel every task. Keep the listener on loopback or a trusted network until
 those controls exist, and do not port-forward it. See
-[docs/interop.md](../docs/interop.md) for the protocol contract, security
-model, and current A2A alpha caveat.
+[docs/interop.md](../docs/interop.md) for the protocol contract and security
+model.
 
 Without STT/TTS adapters, a delegated call uses placeholder transcripts and logs
 replies instead of speaking. The control plane still places, tracks, and cancels
@@ -514,9 +514,6 @@ workflow runs `ruff check` and `pytest` on Python 3.11, 3.12, and 3.13. Python
 - **No control-plane access controls.** `serve` has one shared admin token and
   no destination allowlist, per-requester budget, requester identity, rate
   limit, or queue-depth limit. Keep it on a trusted network.
-- **A2A task execution is alpha.** With `a2a-sdk` 1.2.3 the first `SendMessage`
-  or `SendStreamingMessage` can return `-32006` before a task is created; see
-  [docs/interop.md](../docs/interop.md). MCP is unaffected.
 - **A2A consultation timeouts are stale.** If a consultation times out while
   the A2A task is `TASK_STATE_INPUT_REQUIRED`, the task stays in that state until
   the requester sends another message.

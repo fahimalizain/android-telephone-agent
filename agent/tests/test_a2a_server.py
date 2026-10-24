@@ -23,7 +23,12 @@ pytest.importorskip("starlette")
 import httpx  # noqa: E402
 from a2a.helpers import new_data_part, new_text_message  # noqa: E402
 from a2a.server.request_handlers.response_helpers import agent_card_to_dict  # noqa: E402
-from a2a.types import TaskArtifactUpdateEvent, TaskState, TaskStatusUpdateEvent  # noqa: E402
+from a2a.types import (  # noqa: E402
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskState,
+    TaskStatusUpdateEvent,
+)
 from a2a.utils.constants import PROTOCOL_VERSION_CURRENT  # noqa: E402
 from telephone_agent import __version__  # noqa: E402
 from telephone_agent.consult import ConsultationBroker  # noqa: E402
@@ -264,8 +269,10 @@ def test_new_message_submits_a_call_and_asks_for_consultation_input() -> None:
         await _executor(service).execute(_Context("Get the door code."), queue)
 
         assert service.submitted == ["Get the door code."]
+        tasks = [event for event in queue.events if isinstance(event, Task)]
+        assert len(tasks) == 1
+        assert tasks[0].status.state == TaskState.TASK_STATE_SUBMITTED
         assert [event.status.state for event in _statuses(queue)] == [
-            TaskState.TASK_STATE_SUBMITTED,
             TaskState.TASK_STATE_WORKING,
             TaskState.TASK_STATE_INPUT_REQUIRED,
         ]
@@ -524,6 +531,52 @@ def test_executor_completes_a_real_service_call_with_an_artifact() -> None:
             assert len(tasks) == 1
             assert tasks[0].state is CallTaskState.COMPLETED
             assert payload["task_id"] == tasks[0].id
+        finally:
+            await service.stop()
+
+    asyncio.run(scenario())
+
+
+def test_send_message_creates_a_task_and_completes_over_jsonrpc() -> None:
+    """Exercise the real handler so the SDK's initial-Task ordering is covered."""
+
+    async def scenario() -> None:
+        service = CallService(session_factory=_session_factory, default_number=_NUMBER)
+        await service.start()
+        app = create_a2a_app(service, host="127.0.0.1", port=8766, token=_TOKEN)
+        body = {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "SendMessage",
+            "params": {
+                "message": {
+                    "messageId": "msg-1",
+                    "role": "ROLE_USER",
+                    "parts": [{"text": "Ask about the 3 pm slot."}],
+                }
+            },
+        }
+        headers = {
+            "Authorization": f"Bearer {_TOKEN}",
+            "A2A-Version": PROTOCOL_VERSION_CURRENT,
+            "Accept": "application/json",
+        }
+        try:
+            async with (
+                app.router.lifespan_context(app),
+                httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://127.0.0.1:8766",
+                ) as client,
+            ):
+                response = await client.post("/a2a", json=body, headers=headers)
+                assert response.status_code == 200
+                payload = response.json()
+                assert "error" not in payload, payload
+                task = payload["result"]["task"]
+                assert task["status"]["state"] == "TASK_STATE_COMPLETED"
+                assert task["artifacts"][0]["name"] == "call-summary"
+                assert task["history"][0]["parts"][0]["text"] == "Ask about the 3 pm slot."
         finally:
             await service.stop()
 
