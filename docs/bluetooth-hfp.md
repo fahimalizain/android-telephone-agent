@@ -81,11 +81,11 @@ and then starts audio; `[realtime].greeting` is spoken once those nodes are read
 Auto-answer has no caller-ID filter. The helper does not request `READ_CALL_LOG`, and
 `/state` returns only a phase. Only one call can be active: the helper rejects `/call`
 while a call is ringing or active, the watcher waits for `idle` before re-arming, and the
-daemon serializes its inbound watcher and `run` client requests. The daemon is unit-tested
-and the helper endpoints are implemented. One
-live inbound PSTN call was validated on 2026-10-24: the helper answered after the watcher's
-1 s delay, the SCO nodes appeared, the Grok Voice session opened and requested the
-configured opening greeting at 22:01:27, and the call ran four turns in 39.0 s before a
+daemon serializes its inbound watcher and `run` client requests. The daemon/client path
+was exercised live for an outbound call on 2026-10-24. One live inbound PSTN call was
+validated on the same date: the helper answered after the watcher's 1 s delay, the SCO
+nodes appeared, the Grok Voice session opened and requested the configured opening
+greeting at 22:01:27, and the call ran four turns in 39.0 s before a
 model-requested hangup. Locked-screen answering and vendor restrictions on
 `acceptRingingCall()` remain unverified. See [Inbound calls](./inbound.md).
 
@@ -394,15 +394,18 @@ no call is active, it waits and then exits with an error; place a call first. Di
 silence means the phone is not routing call audio to Bluetooth, the wrong node was
 selected, or the call is muted.
 
-`dial` and `run` are unchanged:
+`dial` places one call through the helper and exits. `run` submits the call to the
+long-lived daemon, which owns the audio path:
 
 ```bash
 telephone-agent --config ../config/config.toml dial --number +15555550100
 telephone-agent --config ../config/config.toml run --number +15555550100
 ```
 
-The helper places the call over the LAN, then the Bluetooth backend waits for the SCO
-nodes and starts the audio loop. Dialing does not use HFP AT commands.
+Start `telephone-agent daemon` (or `telephone-agent-daemon.service`) before `run`.
+`run --direct` keeps the in-process path for debugging when the daemon is stopped. The
+daemon places the call through the LAN helper, waits for the SCO nodes, and starts the
+audio loop. Dialing does not use HFP AT commands.
 
 ## 10. Run in the PipeWire user session
 

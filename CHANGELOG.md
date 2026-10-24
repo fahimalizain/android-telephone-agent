@@ -63,8 +63,9 @@ The project is at alpha; minor versions may change APIs and file layout.
 
 ### Changed
 
-- one long-lived daemon for inbound and outbound; `run` submits to it by default,
-  `--direct` for in-process debugging; outbound timer is a client.
+- One long-lived daemon for inbound and outbound; `run` submits to it by default,
+  `--direct` for in-process debugging; outbound timer is a client. The daemon/client
+  path was exercised live with an outbound call.
 - Inbound calls are live-validated once: on 2026-10-24 the helper answered a ringing PSTN
   call over Bluetooth HFP at mSBC, the Grok Voice session ran four turns in 39.0 s, and a
   model-requested `/hangup` returned the phone to idle. Locked-screen answering remains

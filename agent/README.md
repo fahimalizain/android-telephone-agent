@@ -208,7 +208,8 @@ API key must not enter the repository.
 
 Run these from `agent/` with the virtual environment active, or use the absolute
 console-script path from systemd. From the repository root, `make doctor` and
-`make run` do the same with the root virtual environment.
+`make run` (daemon client) use the root virtual environment; `make daemon` starts the
+daemon and `make run-direct` runs in-process.
 
 ### `doctor`
 

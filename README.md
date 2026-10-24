@@ -296,6 +296,10 @@ The Bluetooth link was weak (RSSI about -87 dBm), and the first call dropped the
 during setup and needed a manual reconnect; later calls were stable. The outbound run
 validates the Bluetooth path on a laptop; latency remains unmeasured.
 
+The unified daemon path was exercised separately: a `run` client submitted an outbound
+call through the daemon, which owned the audio and wrote the transcript; the call
+completed in 30.1 s.
+
 Inbound was validated separately, once, on the same laptop and phone on 2026-10-24. At
 22:01:26 the helper answered a ringing inbound PSTN call after the watcher's 1 s delay,
 and the Grok Voice session opened and requested the configured opening greeting at
