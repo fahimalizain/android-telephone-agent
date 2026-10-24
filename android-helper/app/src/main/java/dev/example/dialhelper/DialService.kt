@@ -90,9 +90,11 @@ class DialService : Service() {
     private val AGENT_SIM_LABEL = BuildConfig.AGENT_SIM_LABEL
 
     /**
-     * How long a placed call is assumed to remain active. This is a heuristic:
-     * without call-state access the service cannot know when the remote party
-     * hangs up. Keep it slightly above the agent's maximum call duration.
+     * How long a placed call is assumed to remain active. isCallActive() is
+     * checked before refusing a new call or after a refused hangup, but the
+     * platform can decline to report call state, so the window still bounds a
+     * call that may outlive the remote party hanging up. Keep it slightly above
+     * the agent's maximum call duration.
      */
     private const val CALL_WINDOW_MS = 10 * 60 * 1000L
 
@@ -410,7 +412,15 @@ class DialService : Service() {
 
       val now = SystemClock.elapsedRealtime()
       if (lastCallAt != 0L && now - lastCallAt < CALL_WINDOW_MS) {
-        return Response(409, errorBody("call already active"))
+        // The remote party can end the call without this service noticing, so
+        // an in-memory window alone would block every later call. Clear it only
+        // when Telecom positively reports that nothing is in progress.
+        if (isCallActive() == false) {
+          lastCallAt = 0L
+          Log.i(TAG, "stale call window cleared")
+        } else {
+          return Response(409, errorBody("call already active"))
+        }
       }
 
       val account = agentAccount()
@@ -472,10 +482,19 @@ class DialService : Service() {
           Log.i(TAG, "hangup requested")
           Response(202, JSONObject().put("state", "hangup-requested"))
         } else {
-          // No foreground call was ended (already finished, or not permitted).
-          // Keep the window so /call cannot overlap a possibly active call.
-          Log.w(TAG, "endCall returned false")
-          Response(202, JSONObject().put("state", "hangup-unavailable"))
+          // No foreground call was ended. That is the normal outcome when the
+          // remote party hung up first, but it also happens when the platform
+          // refuses a non-dialer app. Clear the window only if Telecom confirms
+          // that no call is active; otherwise /call could overlap a live call.
+          if (isCallActive() == false) {
+            lastCallAt = 0L
+            lastHangupAt = now
+            Log.i(TAG, "hangup skipped; no active call; window cleared")
+            Response(202, JSONObject().put("state", "hangup-requested"))
+          } else {
+            Log.w(TAG, "endCall returned false")
+            Response(202, JSONObject().put("state", "hangup-unavailable"))
+          }
         }
       } catch (e: SecurityException) {
         // Common on modern Android for apps that are not the default dialer.
@@ -486,6 +505,24 @@ class DialService : Service() {
         Response(202, JSONObject().put("state", "hangup-unavailable"))
       }
     }
+  }
+
+  /**
+   * Returns true when Telecom reports an ongoing call, false when none is in
+   * progress, or null when the state cannot be read. isInCall() covers calls
+   * placed outside this helper as well, and it is the only signal the platform
+   * offers without a PhoneStateListener. SecurityException means READ_PHONE_STATE
+   * is missing or the caller is restricted; RuntimeException covers vendor
+   * Telecom implementations that refuse the query.
+   */
+  private fun isCallActive(): Boolean? = try {
+    telecom.isInCall
+  } catch (e: SecurityException) {
+    Log.w(TAG, "call state unavailable: ${e.javaClass.simpleName}")
+    null
+  } catch (e: RuntimeException) {
+    Log.w(TAG, "call state unavailable: ${e.javaClass.simpleName}")
+    null
   }
 
   private fun callAccounts(): List<PhoneAccountHandle> {

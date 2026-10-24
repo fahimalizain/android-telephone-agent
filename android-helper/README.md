@@ -22,6 +22,10 @@ It provides:
 - `POST /call` with a bearer token and an E.164 number.
 - `POST /hangup`, best effort, because Android restricts `endCall()` for non-dialer apps.
 
+Before refusing a call or reporting a failed hangup, the helper checks
+`TelecomManager.isInCall()`. That lets it clear a stale ten-minute window when the remote
+party ended the call, instead of requiring a service restart.
+
 It does not touch call audio. Audio is carried by the Pi's USB Audio Class gadget.
 
 ## Status
@@ -327,12 +331,18 @@ request. All responses are JSON.
 
 Numbers must match `^\+[1-9][0-9]{6,14}$` and be normalized on the Pi. `202` on `/call`
 means Telecom accepted the request, not that the call connected. A second call inside
-the ten-minute active window returns `409`. A wrong or missing token returns `401`; a
-missing `CALL_PHONE` permission returns `403` (not retried by the Pi client). Hangup is
-best effort: `202 {"state":"hangup-unavailable"}` means the platform refused
-`endCall()`. A successful `202 hangup-requested` is repeated for 60 seconds so a retry
-after a lost response sees the same result. See `docs/dial-helper.md` for the full
-contract and error table.
+the ten-minute active window returns `409` only while `TelecomManager.isInCall()` reports
+a call, or when that state cannot be read; if no call is active, the helper clears the
+stale window and dials. A wrong or missing token returns `401`; a missing `CALL_PHONE`
+permission returns `403` (not retried by the Pi client).
+
+Hangup is best effort. `202 {"state":"hangup-requested"}` means no call is active after
+the request: `endCall()` succeeded, or it returned `false` and `isInCall()` reported no
+call, in which case the window is cleared. `202 {"state":"hangup-unavailable"}` means
+`endCall()` did not end anything while a call may still be active — or its state could
+not be read — so the window is retained and `/call` keeps returning `409`. A successful
+`202 hangup-requested` is repeated for 60 seconds so a retry after a lost response sees
+the same result. See `docs/dial-helper.md` for the full contract and error table.
 
 ## Test
 
@@ -355,8 +365,9 @@ curl -i -sS -X POST "http://$PHONE_IP:8765/hangup" \
   -H "Authorization: Bearer $DIAL_TOKEN"
 ```
 
-A wrong token must return `401`. A call placed while the previous call is inside the
-ten-minute window must return `409`. Watch the log:
+A wrong token must return `401`. A call placed while the previous call is still active
+inside the ten-minute window must return `409`; if the remote party already hung up, the
+same request is accepted and applies the stale-window recovery. Watch the log:
 
 ```sh
 adb logcat -s DialHelper
@@ -377,17 +388,19 @@ The log must never contain the destination number or the token.
 | `503 no SIM available` | `READ_PHONE_STATE` or `READ_PHONE_NUMBERS` missing, no account matches `AGENT_SIM_LABEL`, or the label is blank on dual SIM |
 | `403 call permission denied` | `CALL_PHONE` not granted |
 | SIM picker on the phone | The configured label did not match a call-capable account; read `sim` from `/health` and correct `dialHelperSimLabel` |
-| `202 hangup-unavailable` | `endCall()` refused by the platform; see `docs/dial-helper.md` |
+| `202 hangup-unavailable` | `endCall()` refused by the platform and a call may still be active, or call state was unreadable; see `docs/dial-helper.md` |
 | Service disappears | Samsung sleeping apps or battery optimization; re-check the settings |
 | Service is not listening after reboot | Android blocked the boot start; open the launcher activity or start the service with adb |
 
 ## Limitations
 
 This is a reference, not a product. It lacks TLS, rate limiting, replay protection, a
-real HTTP server, call-state tracking, and secure token storage. The HTTP parser handles
-one request per connection, caps line and body size, and closes the socket, but it has
-not been fuzzed. The foreground service can still be killed by vendor battery management.
-`endCall()` is deprecated and restricted, so hangup may not work.
+real HTTP server, continuous call-state tracking, and secure token storage. Call state is
+sampled with `TelecomManager.isInCall()` only when `/call` or `/hangup` needs it; there is
+no callback. The HTTP parser handles one request per connection, caps line and body size,
+and closes the socket, but it has not been fuzzed. The foreground service can still be
+killed by vendor battery management. `endCall()` is deprecated and restricted, so hangup
+may not work.
 
 The APK builds, but no physical-device or end-to-end audio validation has been recorded.
 SIM labels, locked-screen dialing, boot startup, and vendor-specific permission behavior

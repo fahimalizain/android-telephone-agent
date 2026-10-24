@@ -54,6 +54,12 @@ HTTP/1.1 202 Accepted
 `202` means Telecom accepted the request, not that the call connected; the helper does
 not wait for setup. Numbers must match `^\+[1-9]\d{6,14}$` and be normalized on the Pi.
 
+A `/call` inside the ten-minute window is refused with `409` only when
+`TelecomManager.isInCall()` reports a call in progress, or when the state cannot be
+read. If it reports no call, the window is stale — typically because the remote party
+hung up first — and is cleared so the new call proceeds. The service logs
+`stale call window cleared` without any number.
+
 ### `POST /hangup`
 
 ```http
@@ -65,10 +71,13 @@ HTTP/1.1 202 Accepted
 ```
 
 Requires the bearer token and no body. `409 {"error":"no active call"}` means the helper
-has no record of a placed call (it restarted, the window was reset, or no call was placed);
-`202 {"state":"hangup-unavailable"}` means the platform refused to end the call. A
-successful `202 hangup-requested` is repeated for a 60-second grace period so a client
-that lost the first response can retry safely.
+has no record of a placed call (it restarted, the window was reset, or no call was placed).
+`202 {"state":"hangup-requested"}` means no call is active after the request: either
+`endCall()` succeeded, or it returned `false` and `TelecomManager.isInCall()` reported no
+call, in which case the window is cleared. `202 {"state":"hangup-unavailable"}` means
+`endCall()` did not end anything and a call may still be active, or its state could not be
+read; the window is kept. A successful `202 hangup-requested` is repeated for a 60-second
+grace period so a client that lost the first response can retry safely.
 
 ### Error model
 
@@ -77,7 +86,7 @@ that lost the first response can retry safely.
 | 400 | `{"error":"invalid number"}` | Missing/invalid JSON, or not E.164 |
 | 401 | `{"error":"unauthorized"}` | Missing, malformed, or wrong token |
 | 403 | `{"error":"call permission denied"}` | `CALL_PHONE` is not granted |
-| 409 | `{"error":"call already active"}` | Call placed inside the active window |
+| 409 | `{"error":"call already active"}` | Call is inside the active window and Telecom reports a call, or its state is unknown |
 | 409 | `{"error":"no active call"}` | `/hangup` with no recorded call |
 | 503 | `{"error":"no SIM available"}` | No account, or no label match |
 | 503 | `{"error":"token not configured"}` | Placeholder token left in the build |
@@ -108,7 +117,9 @@ that lost the first response can retry safely.
 | `WAKE_LOCK` | Normal, optional | Only if a partial wake lock is added |
 
 `READ_PHONE_STATE` is required by `getCallCapablePhoneAccounts()` unless the app is the
-default dialer. Android 14 and newer additionally require `READ_PHONE_NUMBERS` for
+default dialer. The helper also calls `TelecomManager.isInCall()` before trusting a stale
+call window; if the platform denies that query, the window is retained. Android 14 and
+newer additionally require `READ_PHONE_NUMBERS` for
 `getPhoneAccount()`, which the helper uses to read the account label for SIM selection.
 Neither permission is used for call audio, and neither grants call recording or call-log
 access. Do not make the helper the default dialer; that changes the phone's call UI and
@@ -163,15 +174,23 @@ by One UI version, locale, and carrier branding; verify on your device.
 `TelecomManager.endCall()` requires `ANSWER_PHONE_CALLS`. It is deprecated, returns
 `false` when it did not end anything, and some builds refuse it for non-dialer apps.
 
-The helper treats hangup as best effort: `202 hangup-requested` means `endCall()`
-returned `true`; `202 hangup-unavailable` means the platform refused; `409` means the
-helper has no record of a placed call. Do not read `202` as proof the call ended. The
-call window is cleared only after `endCall()` returns `true`; on a refusal or exception
-it stays in place, so a following `/call` returns `409` instead of overlapping a call
-that may still be active. The ten-minute `CALL_WINDOW_MS` gates new `/call` requests,
-not `/hangup`, so a call that lasts longer than ten minutes can still be ended. The
-fallback is for the agent to finish and the remote party to hang up, with a hard maximum
-duration enforced by the Pi; the cellular leg may stay up and billed until then.
+The helper treats hangup as best effort and checks `TelecomManager.isInCall()` before
+deciding what a `false` return means. `202 hangup-requested` means no call is active after
+the request: either `endCall()` returned `true`, or it returned `false` and `isInCall()`
+reported no call, in which case the window is cleared and the 60-second retry grace
+starts. `202 hangup-unavailable` means `endCall()` returned `false` or threw while
+`isInCall()` reported a call or could not be read; the window is kept so a following
+`/call` returns `409` instead of overlapping a call that may still be active. `409` means
+the helper has no record of a placed call.
+
+Do not read `202` as proof the call ended: on `hangup-requested` the helper either ended
+the call or observed that none is active, but a vendor build can be wrong. The ten-minute `CALL_WINDOW_MS` gates new
+`/call` requests, not `/hangup`, so a call that lasts longer than ten minutes can still be
+ended. A `/call` inside the window is likewise allowed when `isInCall()` reports no call,
+which recovers from a remote hangup without restarting the service. The fallback for a
+call the helper cannot observe is for the agent to finish and the remote party to hang up,
+with a hard maximum duration enforced by the Pi; the cellular leg may stay up and billed
+until then.
 
 ## Reliability
 
@@ -231,7 +250,8 @@ curl -i -sS -X POST "http://$PHONE_IP:8765/hangup" \
 # HTTP/1.1 202 Accepted / {"state":"hangup-requested"}
 ```
 
-A second call inside the active window returns `409`; a wrong token returns `401`:
+A second call inside the active window returns `409` while Telecom reports the call as
+active; a wrong token returns `401`:
 
 ```sh
 curl -i -sS -X POST "http://$PHONE_IP:8765/call" \
@@ -245,7 +265,8 @@ Run these from the Pi; the phone has no curl binary by default. Watch
 
 ## Known limitations
 
-- No call-state callback; the ten-minute window is a heuristic. A real callback needs
+- Call state is sampled with `TelecomManager.isInCall()` only at `/call` and `/hangup`; a
+  call that ends between requests is noticed on the next one. A real callback needs
   `PhoneStateListener` and `READ_PHONE_STATE` (plus `READ_CALL_LOG` for history).
 - `endCall()` is deprecated and restricted; some builds return `false` or throw even with
   `ANSWER_PHONE_CALLS`.
@@ -259,7 +280,10 @@ Run these from the Pi; the phone has no curl binary by default. Watch
 ## Verification
 
 1. `GET /health` returns `200` with the expected SIM label. `POST /call` returns `202`
-   with no SIM picker, the callee sees the agent SIM's number, and a repeat gives `409`.
+   with no SIM picker, the callee sees the agent SIM's number, and a repeat gives `409`
+   while the call is active.
 2. `POST /hangup` returns `202`; confirm on the phone whether the call ended, and check
-   `adb logcat -s DialHelper` for outcomes without any number or token.
+   `adb logcat -s DialHelper` for outcomes without any number or token. After the remote
+   party hangs up first, `/hangup` must return `202 hangup-requested` and a following
+   `/call` must be accepted without restarting the service.
 3. After a reboot, check whether the service is listening.
