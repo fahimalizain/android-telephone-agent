@@ -21,7 +21,7 @@ audio gateway (AG). Call audio travels over a synchronous SCO link. The called p
 answers on an ordinary phone: no app, no data connection, and no root are required on the
 receiving side. Caller ID is the agent SIM's number.
 
-The repository contains a design document and a reference software scaffold. The
+The repository contains design documentation and a reference implementation. The
 [design brief](docs/design-brief.md) is the source of truth. The Bluetooth HFP path is
 the only supported audio transport; see the [Bluetooth HFP guide](docs/bluetooth-hfp.md)
 and [ADR 0009](docs/decisions/0009-bluetooth-only-linux-host.md).
@@ -36,6 +36,66 @@ token and does not yet enforce a destination allowlist, per-requester budgets, o
 requester identity, so keep it on a trusted network. See the
 [interoperability guide](docs/interop.md).
 
+## Quick start
+
+The full setup is in the [Bluetooth HFP guide](docs/bluetooth-hfp.md) and
+[Android setup](docs/android-setup.md). The short version:
+
+1. **Prepare the host.** Install BlueZ, PipeWire, WirePlumber, and the PipeWire CLI
+   tools. Run the agent as the user who owns the PipeWire session, not as root or from a
+   system service.
+
+   ```bash
+   ./scripts/bluetooth-setup.sh
+   bluetoothctl
+   # power on; agent on; default-agent; scan on
+   # pair <phone-mac>; trust <phone-mac>; connect <phone-mac>
+   ```
+
+   On Phone A, enable **Calls and audio** for the host.
+
+2. **Build and install the helper.** This is a bench step: the install uses adb over USB
+   or Wi-Fi. Configure the release keystore and `dialHelperToken` as described in the
+   [helper README](android-helper/README.md), then:
+
+   ```bash
+   ./scripts/build-helper.sh
+   ./scripts/install-helper.sh --health http://<phone-ip>:8765
+   ```
+
+3. **Configure the agent.** Copy the example, fill in the phone's Bluetooth address, the
+   helper URL, and the same helper token, then lock the file down. For Grok Voice, set
+   `[realtime].api_key` or export `XAI_API_KEY` instead of storing the key in the file.
+
+   ```bash
+   cp config/config.example.toml config/config.toml
+   chmod 600 config/config.toml
+   # edit config/config.toml
+   ```
+
+4. **Check the path.**
+
+   ```bash
+   make doctor
+   ```
+
+   With no call active, the SCO nodes are absent. That is expected; the check verifies the
+   host tools, configuration, and helper reachability.
+
+5. **Place a call.**
+
+   ```bash
+   cd agent && ../.venv/bin/python -m telephone_agent \
+     --config ../config/config.toml run --number +91XXXXXXXXXX
+   ```
+
+   Use `dial` for a one-shot call with no conversation loop, or `inbound` to wait for
+   incoming calls. See [Inbound calls](docs/inbound.md).
+
+6. **Run it as a service.** Install the Bluetooth and inbound systemd *user* units from
+   `scripts/systemd/`. The agent must share the PipeWire/WirePlumber session; see the
+   [Bluetooth guide](docs/bluetooth-hfp.md#10-run-in-the-pipewire-user-session).
+
 ## What this is not
 
 - Not an interception or injection tool for a call already in progress on your phone.
@@ -47,7 +107,7 @@ requester identity, so keep it on a trusted network. See the
 - Not a VoIP or SIP client. The call leg is a genuine cellular call.
 - Not a finished product. APIs and file layout may change.
 
-## Why the naive approach fails
+## Why app-side audio injection fails
 
 The obvious approach, running an app on the phone and feeding audio into the call, does
 not work: the modem's transmit path lives inside the modem, baseband, and DSP firmware,
@@ -91,8 +151,9 @@ and the host must run in the user session that owns PipeWire and WirePlumber.
 1. **Scheduled dial.** A scheduler on the host decides that a call slot is due and sends
    a request to a small helper app on Phone A over the LAN, authenticated with a bearer
    token. The helper places the call with `TelecomManager.placeCall()` on the agent SIM,
-   so Phone B rings with SIM A's number. Wireless `adb` is a development-only
-   alternative and is not suitable for unattended use.
+   so Phone B rings with SIM A's number. The scheduler is the v0.1 milestone; `dial` and
+   `run` are the current entry points. Wireless `adb` is a development-only alternative
+   and is not suitable for unattended use.
 2. **Bluetooth HFP audio.** The host advertises the HFP hands-free (HF) role; Phone A is
    the audio gateway (AG). Pair the phone, trust the host, and enable **Calls and audio**
    for it. During a call PipeWire creates a SCO source for the downlink and a SCO sink for
@@ -100,35 +161,32 @@ and the host must run in the user session that owns PipeWire and WirePlumber.
    otherwise. SCO nodes exist only while a call is active, so verify the adapter roles,
    the phone connection, and both nodes with the Bluetooth check and audio-test scripts
    before connecting the agent.
-3. **Speech pipeline.** The host captures the SCO source, resamples to 16 kHz mono, runs
-   voice activity detection, and streams audio to a speech-to-text provider. The
-   transcript goes to a streaming LLM, and the reply is synthesized sentence by sentence,
-   resampled to the SCO rate, and played to the SCO sink. Barge-in stops playback when the
-   callee speaks; endpointing and timeouts keep the conversation from stalling.
-   Alternatively, `realtime.kind = "grok"` uses xAI's Grok Voice speech-to-speech
-   WebSocket in one full-duplex session; that adapter is independent of the STT/LLM/TTS
-   seams. Its documented realtime languages do not include Malayalam yet.
+3. **Speech pipeline.** The bundled conversational path is `realtime.kind = "grok"`: the
+   host captures the SCO source, streams 16 kHz PCM to xAI's Grok Voice WebSocket, and
+   plays the returned audio to the SCO sink. Server-side VAD handles barge-in and
+   turn-taking. The text pipeline remains a seam for custom providers: it provides VAD and
+   endpointing, but no STT or TTS adapter is bundled, and `[brain]` can target an
+   OpenAI-compatible endpoint for text-only testing. Grok's documented realtime languages
+   do not include Malayalam yet.
 4. **Hangup.** The agent stops audio, requests call termination through the helper where
    Android permits it, and otherwise relies on the remote party or the hard call-duration
-   limit to end the call. The outcome is logged locally and summarized in a heartbeat.
+   limit to end the call. The outcome is logged locally; a heartbeat is planned for v0.1.
 
 The network codec (AMR-NB, AMR-WB, or EVS) caps audio fidelity regardless of the SCO
 rate. mSBC gives a 16 kHz link between the phone and the host, but an AMR-NB network leg
 remains 8 kHz. The target is latency and turn-taking, not hi-fi.
 
-## Hardware at a glance
+## Requirements
 
 | Role | Requirement | Notes |
 |---|---|---|
-| Host | Linux with BlueZ, PipeWire, and WirePlumber in the same user session | Onboard Bluetooth is sufficient for the validated setup; a desktop or laptop works. |
+| Host | Linux with BlueZ, PipeWire, and WirePlumber in the same user session | The validated setup used a laptop's onboard adapter; a laptop, desktop, or mini PC works. |
 | Phone A | Spare Android phone with Bluetooth HFP and the **Calls and audio** setting | Samsung Galaxy A23 4G (SM-A235F) is the validated device. |
 | SIM | Voice-capable SIM with credit and a known number | Use a SIM dedicated to the agent, especially for inbound. |
 | Network | Private LAN shared by the phone and host, with internet access | The helper is LAN-only; do not port-forward it. |
-| Power | Phone charger and mains power for the host | The phone can charge from any USB charger because its port is not the audio link. |
+| Power | Phone charger and mains power for the host | The phone charges from its own charger; Bluetooth is the audio link. |
 
-No single-board computer, USB audio device, hub, UPS, or bill of materials is required. The host
-may be a laptop, desktop, or small Linux machine with a working Bluetooth adapter. Local
-speech models are a stretch goal on a larger host, not part of the reference
+Local speech models are a stretch goal on a larger host, not part of the reference
 configuration.
 
 ## Repository map
@@ -208,10 +266,12 @@ The map matches the layout described in section 14 of the design brief.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| v0 | Manual dial and Bluetooth HFP SCO verification | Done on a Linux laptop: adapter roles, pairing, mSBC 16 kHz SCO, and a real outbound conversation; no USB audio route |
+| v0 | Manual dial and Bluetooth HFP SCO verification | Validated on a Linux laptop: helper dial, mSBC 16 kHz SCO, Grok conversation, agent-initiated hangup |
 | v0.1 | Scheduler, one call per slot, bounded retries, heartbeat and alerting | Planned |
-| v0.2 | Barge-in, endpointing, streaming STT/LLM/TTS, latency measurement against the budget | Planned |
-| v0.3 | Inbound calls | Implemented; daemon unit-tested; live inbound PSTN validation pending |
+| v0.2 | Latency measurement; bundled STT/TTS adapters for the text pipeline | Planned; Grok supplies barge-in and endpointing |
+| v0.3 | Inbound calls | Implemented and unit-tested; live inbound PSTN validation pending |
+
+### Validation
 
 The Android helper builds from `android-helper/` with Gradle and produces an
 installable APK. On 2026-10-24 the Bluetooth HFP path was validated end to end on a Linux
@@ -241,11 +301,13 @@ use this project for spam, impersonation, or evasion of caller-ID rules, and do 
 people who have not consented. Recording calls requires consent that varies by
 jurisdiction; call recording is out of scope.
 
-Call audio is sent to third-party speech-to-text and text-to-speech providers, so those
-providers see the conversation audio. Choose providers and regions accordingly, do not
-persist audio, and keep phone numbers, SIM identifiers, API keys, and helper tokens out
-of the repository. The helper endpoint binds to a private interface, requires a bearer
-token, and must not be port-forwarded. See [SECURITY.md](SECURITY.md).
+Call audio is sent to the configured speech provider: xAI for Grok Voice, or your own
+STT/TTS adapters. Those providers see the conversation audio, so choose providers and
+regions accordingly, do not persist audio, and keep phone numbers, SIM identifiers, API
+keys, and helper tokens out of the repository. The helper endpoint listens on the phone's
+LAN address, requires a bearer token, and must not be port-forwarded. The token is
+compiled into the sideloaded APK and is extractable; treat the APK as a secret and rotate
+the token if it leaks. See [SECURITY.md](SECURITY.md).
 
 Local transcripts are opt-in with `[transcript].enabled = true`. When enabled, the agent
 writes one timestamped JSONL file per call under `runtime/transcripts` by default. These
@@ -259,35 +321,34 @@ retention schedule. Call audio itself is not written to disk.
 
 ## Status and limitations
 
-- Alpha. The voice runtime is a reference scaffold; there is no stable release.
+- Alpha. The voice runtime is a reference implementation; there is no stable release.
 - Bluetooth HFP is the only supported audio transport. The host must run BlueZ, PipeWire,
   and WirePlumber in the user session that runs the agent; a system service that does not
   share that session cannot see the SCO nodes.
 - The HFP path is validated on a Linux laptop with a Galaxy A23, not with live inbound
   calls. The validated link was weak (RSSI about -87 dBm), and the first call dropped
   Bluetooth during setup and needed a manual reconnect.
-- The earlier Pi-based and USB audio route was removed on 2026-10-24. This project no
-  longer supports a Pi, a USB audio device, a USB hub, or a UPS. See
-  [ADR 0009](docs/decisions/0009-bluetooth-only-linux-host.md).
 - Inbound answering is opt-in and answers every ringing call on the agent SIM. The helper
   does not request `READ_CALL_LOG`, so there is no caller-ID filter, allowlist, or
   screening. Use a SIM dedicated to the agent.
 - `acceptRingingCall()` is best effort for a non-default dialer. Android may deny or
   ignore the answer on a locked screen or a vendor build; the helper reports `403` or
   `500`, and the daemon keeps polling.
-- The Android helper app is a reference, not a supported product. Ending a call through
-  `TelecomManager.endCall()` requires privileged access on modern Android, so the
-  fallback path may be the only option on some devices.
+- The Android helper app is a reference, not a supported product.
+  `TelecomManager.endCall()` may be refused on modern Android for apps that are not the
+  default dialer; the fallback is the remote party or the hard call-duration limit.
 - The latency budget is a target, not a measurement, including on the Bluetooth run.
-- Bluetooth carries audio only. HFP has no ringing signal or caller ID, so the LAN helper
-  answers an inbound call before the SCO nodes exist.
+- Bluetooth carries audio only in this design. The reference host does not implement HFP
+  call control, so ringing, answering, and hangup use the LAN helper. The helper also
+  does not request `READ_CALL_LOG`, so inbound caller ID is unavailable; SCO nodes appear
+  only after the call is answered.
 - Local transcripts are opt-in and contain full personal data: full phone numbers where
   known, verbatim conversation text, and call metadata, with mode `0600` in a `0700`
   directory. Operational logs are masked. Treat transcript files as PII and apply a
   retention policy.
 - One phone, one host, and one call at a time. Inbound and outbound calls share that slot
-  and are serialized. Local speech models remain a stretch goal on a host with more CPU
-  and RAM than the validated laptop requires.
+  and are serialized. Local speech models remain a stretch goal and are not part of the
+  reference configuration.
 
 ## Documentation and contributing
 
