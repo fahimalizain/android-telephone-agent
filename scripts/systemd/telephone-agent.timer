@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily scheduled call for the telephone agent
+
+[Timer]
+# Call time in the local system time zone. The explicit zone makes the intent
+# unambiguous even if the Pi's time zone is misconfigured.
+OnCalendar=*-*-* 08:00:00 Asia/Kolkata
+AccuracySec=1s
+# Do not catch up on missed slots after a reboot or power cut. A late-night
+# call is worse than a skipped one. The runtime records and alerts on misses.
+Persistent=false
+Unit=telephone-agent.service
+
+[Install]
+WantedBy=timers.target

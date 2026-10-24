@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Project runtime artifacts
+*.wav
+*.raw
+*.pcm
+*.log
+logs/
+recordings/
+runtime/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Secrets
+config/config.toml
+config/local.toml
+*.pem
+*.key

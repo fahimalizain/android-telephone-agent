@@ -1,0 +1,104 @@
+name: Bug report
+description: Report a reproducible defect in documentation, scripts, the reference runtime, or hardware behavior.
+title: "[bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is at alpha, design stage, so some behavior is expected to be
+        incomplete. Please describe what you actually observed rather than what you
+        expected from the design.
+
+        Do not include phone numbers, SIM identifiers, IMEI numbers, API keys, helper
+        tokens, Wi-Fi credentials, or other personal data. Redact logs before pasting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A concise description of the problem and when it occurs.
+      placeholder: Describe the failure and any error message you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest sequence that reliably reproduces the problem.
+      placeholder: |
+        1. Flash Raspberry Pi OS Lite 64-bit and boot the Pi.
+        2. Run scripts/uac-gadget.sh and connect the phone.
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: recent-changes
+    attributes:
+      label: What changed recently
+      description: List anything that changed before the problem appeared, such as an OS update, a different hub, or a configuration edit.
+      placeholder: Updated Raspberry Pi OS, replaced the USB-C hub, rotated the helper token
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen, and why?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include exact error text where possible.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Choose the part of the project closest to the problem.
+      options:
+        - Documentation
+        - USB gadget and audio routing
+        - Android setup or helper app
+        - Dialing and call control
+        - Voice agent runtime
+        - Scripts and systemd
+        - Power, thermal, or hardware
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Phone model and region, Pi model, hub, charger, and UPS.
+      placeholder: Samsung Galaxy A23 4G (SM-A235F), Raspberry Pi Zero 2 W, generic PD hub
+  - type: input
+    id: software
+    attributes:
+      label: Software and OS
+      description: Android version and vendor build, Raspberry Pi OS image, kernel, and the commit or release you tested.
+      placeholder: Android 14 / One UI 6.x, Raspberry Pi OS Lite 64-bit Bookworm, commit abc1234
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste only the relevant excerpt. Remove identifiers and credentials.
+      render: shell
+      placeholder: |
+        $ dmesg | tail -20
+        $ aplay -l
+        $ arecord -l
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I removed phone numbers, SIM identifiers, IMEI numbers, tokens, and other personal data from this report.
+          required: true
+        - label: I can reproduce this on the latest commit or the latest release.
+          required: false

@@ -1,0 +1,11 @@
+item,qty,purpose,indicative_price_inr,source,required,notes
+Raspberry Pi Zero 2 W,1,"UAC1 gadget and agent runtime",1800-2400,"ThinkRobotics (Kochi); Robu.in; Element14 India",yes,"2.4 GHz Wi-Fi only; no Ethernet; verify board revision; verify current prices."
+"32 GB microSD, A1/A2",1,"Raspberry Pi OS Lite 64-bit boot medium",400-800,"Amazon.in; Robu.in",yes,"A1/A2 rating; reputable brand; verify current prices."
+"USB-C hub with PD passthrough and at least one USB-A port",1,"Power and data path for phone and Pi",800-2000,"Amazon.in; Robu.in",yes,"Must pass data while powered; avoid charge-only OTG splitters; verify current prices and port layout."
+"USB-C to USB-C 60 W cable",1,"Charger to hub PD input",250-600,"Amazon.in; Robu.in",yes,"Short, data-rated, strain-relieved; verify current prices."
+"USB-A to micro-USB cable",1,"Hub downstream port to Pi OTG port",150-350,"Amazon.in; Robu.in",yes,"Data-rated, not charge-only; verify current prices."
+Phone stand,1,"Holds the phone upright with the port clear",150-500,Amazon.in,yes,"Stable, open back, cable clearance; verify current prices."
+"Mini UPS, 5 V output",1,"Backup for hub and Wi-Fi router",1200-2500,"Amazon.in; Robu.in",yes,"Check router voltage and hub input; size per power-and-thermal.md; verify current prices."
+"USB-C earphones with microphone",1,"Phase 0 routing test before buying the Pi",400-800,Amazon.in,no,"Digital USB-C audio, not 3.5 mm or a passive adapter; verify current prices."
+"Raspberry Pi 4 Model B 2 GB",1,"Alternative to the Zero 2 W: Ethernet and local-model headroom",4500-6000,"ThinkRobotics (Kochi); Element14 India; Robu.in",no,"Adds about Rs 3000 over the Zero 2 W; power via GPIO; Pi 5 not supported; verify current prices."
+"Raspberry Pi 4 5 V/3 A PSU and GPIO power cable",1,"Powers the Pi 4 while USB-C is the gadget port",700-1200,"ThinkRobotics (Kochi); Robu.in; Amazon.in",no,"Only for the Pi 4 path; verify polarity; verify current prices."

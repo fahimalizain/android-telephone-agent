@@ -1,0 +1,20 @@
+[Unit]
+Description=USB Audio Class 1 gadget for the telephone agent
+After=local-fs.target sys-kernel-config.mount systemd-modules-load.service
+Wants=sys-kernel-config.mount
+Before=telephone-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/uac-gadget.sh start
+ExecStop=/usr/local/sbin/uac-gadget.sh stop
+Restart=on-failure
+RestartSec=2
+
+# Do not add ProtectSystem=strict or another mount sandbox here. The service
+# must write to configfs under /sys/kernel/config; a strict read-only view
+# would make the gadget start fail.
+
+[Install]
+WantedBy=multi-user.target

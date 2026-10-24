@@ -1,0 +1,25 @@
+[Unit]
+Description=Telephone agent, one scheduled outbound call
+Documentation=https://github.com/fahimalizain/android-telephone-agent
+After=network-online.target uac-gadget.service
+Wants=network-online.target uac-gadget.service
+
+[Service]
+Type=oneshot
+# The repository may live elsewhere. This unit expects the runtime at
+# /opt/telephone-agent with a virtual environment in /opt/telephone-agent/.venv.
+# Change User to the account that owns the installation.
+User=pi
+SupplementaryGroups=audio
+WorkingDirectory=/opt/telephone-agent
+EnvironmentFile=-/etc/telephone-agent.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/telephone-agent/.venv/bin/python -m telephone_agent --config /etc/telephone-agent.toml run
+TimeoutStartSec=900
+# One activation is one call. Do not add Restart=always: a restart would
+# redial. Retries and idempotency belong in the runtime and the slot logic.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

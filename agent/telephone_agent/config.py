@@ -1,0 +1,409 @@
+"""Configuration loading and validation for the telephone agent.
+
+Settings live in a TOML file. The dataclass defaults below are the lowest
+precedence, TOML values override them, and ``TELEPHONE_AGENT_*`` environment
+variables override both. Nested overrides use a double underscore::
+
+    TELEPHONE_AGENT_DIALER__TOKEN=...
+    TELEPHONE_AGENT_AUDIO__SAMPLE_RATE=48000
+
+The loader is intentionally strict. Unknown keys and unknown environment
+variables are errors rather than silent no-ops, because a typo in a token or a
+card name is otherwise difficult to diagnose. Validation of sample rates, frame
+alignment, URLs, and E.164 numbers happens here, before a call is placed.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import re
+import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields, replace
+from pathlib import Path
+from typing import TypeVar
+from urllib.parse import urlsplit
+
+__all__ = [
+    "AgentConfig",
+    "AudioConfig",
+    "BrainConfig",
+    "Config",
+    "ConfigError",
+    "DialerConfig",
+    "ensure_e164",
+    "load",
+    "validate",
+]
+
+_ENV_PREFIX = "TELEPHONE_AGENT_"
+_E164_PATTERN = re.compile(r"^\+[1-9]\d{6,14}$")
+_CARD_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+_T = TypeVar("_T")
+
+
+class ConfigError(ValueError):
+    """Raised when a configuration file or environment override is invalid."""
+
+
+@dataclass(frozen=True, slots=True)
+class AudioConfig:
+    """ALSA capture and playback settings for the USB gadget sound card.
+
+    ``card`` is the ALSA card id shown by ``arecord -l`` (the token after
+    ``card N:``), not the bracketed human-readable description. The gadget
+    itself runs at 48 kHz stereo; the default here is 16 kHz mono because ALSA's
+    ``plughw`` plugin resamples and the network codec cannot use the extra
+    bandwidth.
+    """
+
+    card: str = ""
+    device: int = 0
+    sample_rate: int = 16_000
+    channels: int = 1
+    frame_ms: int = 20
+
+
+@dataclass(frozen=True, slots=True)
+class DialerConfig:
+    """Settings for the HTTP helper that places and ends calls on Phone A."""
+
+    url: str = ""
+    token: str = field(default="", repr=False)
+    timeout_s: float = 10.0
+    retries: int = 2
+
+
+@dataclass(frozen=True, slots=True)
+class BrainConfig:
+    """Settings for the text-in, text-out conversation brain.
+
+    ``kind = "echo"`` is a loopback aid and ignores the HTTP fields.
+    ``kind = "http"`` targets any OpenAI-compatible ``/chat/completions`` API.
+    ``api_key`` may be empty for a local OpenAI-compatible server.
+    """
+
+    kind: str = "echo"
+    base_url: str = ""
+    api_key: str = field(default="", repr=False)
+    model: str = ""
+    system_prompt: str = ""
+    max_tokens: int = 200
+    timeout_s: float = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class AgentConfig:
+    """Call-level policy: duration limits, endpointing, and language."""
+
+    schedule: str = ""
+    max_call_seconds: int = 300
+    silence_timeout_s: float = 20.0
+    vad_threshold: float = -40.0
+    language: str = "en"
+
+
+@dataclass(frozen=True, slots=True)
+class Config:
+    """Top-level runtime configuration.
+
+    ``phone_number`` is optional in the file because ``doctor`` and ``selftest``
+    do not call anyone. ``dial`` and ``run`` require either this value or an
+    explicit ``--number`` argument.
+    """
+
+    audio: AudioConfig = field(default_factory=AudioConfig)
+    dialer: DialerConfig = field(default_factory=DialerConfig)
+    brain: BrainConfig = field(default_factory=BrainConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    phone_number: str = field(default="", repr=False)
+
+
+def ensure_e164(number: str, label: str = "phone number") -> str:
+    """Validate *number* as E.164 and return it unchanged.
+
+    E.164 numbers begin with ``+``, start with a non-zero digit, and contain at
+    most 15 digits. No spaces, hyphens, or leading zeros are accepted.
+    """
+
+    if not _E164_PATTERN.fullmatch(number):
+        raise ConfigError(
+            f"{label} must be in E.164 format, for example +15555550100 "
+            f"(got {_mask_sensitive(number)!r})"
+        )
+    return number
+
+
+def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) -> Config:
+    """Load, apply environment overrides to, and validate a TOML configuration.
+
+    Args:
+        path: Path to the TOML file.
+        env: Environment mapping to read overrides from. Defaults to
+            ``os.environ``. Tests pass an explicit mapping to stay isolated.
+
+    Raises:
+        ConfigError: If the file is missing or malformed, a key is unknown, a
+            value has the wrong type, or validation fails.
+    """
+
+    config_path = Path(path)
+    try:
+        with config_path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            f"config file not found: {config_path}. Copy config/config.example.toml "
+            "to config/config.toml and replace the placeholders."
+        ) from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"invalid TOML in {config_path}: {exc}") from exc
+    except OSError as exc:
+        raise ConfigError(f"cannot read config file {config_path}: {exc}") from exc
+
+    allowed = {"phone_number", "audio", "dialer", "brain", "agent"}
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ConfigError(
+            "unknown top-level configuration key(s): "
+            f"{', '.join(unknown)}; expected phone_number, audio, dialer, brain, agent"
+        )
+
+    config = Config(
+        phone_number=_coerce_str(data.get("phone_number", ""), "phone_number"),
+        audio=_build_section(AudioConfig, data.get("audio"), "audio"),
+        dialer=_build_section(DialerConfig, data.get("dialer"), "dialer"),
+        brain=_build_section(BrainConfig, data.get("brain"), "brain"),
+        agent=_build_section(AgentConfig, data.get("agent"), "agent"),
+    )
+    config = _apply_env(config, os.environ if env is None else env)
+    validate(config)
+    return config
+
+
+def validate(config: Config) -> None:
+    """Validate a fully constructed :class:`Config`.
+
+    This function is separate from :func:`load` so callers that build a
+    ``Config`` programmatically can apply the same checks.
+    """
+
+    _validate_audio(config.audio)
+    _validate_dialer(config.dialer)
+    _validate_brain(config.brain)
+    _validate_agent(config.agent)
+    if config.phone_number:
+        ensure_e164(config.phone_number)
+
+
+def _mask_sensitive(value: str) -> str:
+    """Keep the last four characters when echoing an invalid phone number."""
+
+    digits = value.removeprefix("+")
+    if len(digits) <= 4:
+        return "*" * len(digits)
+    return "*" * (len(digits) - 4) + digits[-4:]
+
+
+def _validate_audio(audio: AudioConfig) -> None:
+    if not audio.card:
+        raise ConfigError(
+            "audio.card is required; run `arecord -l` and set [audio].card to the "
+            "gadget card id (the token after 'card N:')"
+        )
+    if not _CARD_PATTERN.fullmatch(audio.card):
+        raise ConfigError(
+            f"audio.card must contain only letters, digits, '_', '-', or '.' (got {audio.card!r})"
+        )
+    if audio.device < 0:
+        raise ConfigError(f"audio.device must be >= 0 (got {audio.device})")
+    if not 8_000 <= audio.sample_rate <= 48_000:
+        raise ConfigError(
+            f"audio.sample_rate must be between 8000 and 48000 Hz (got {audio.sample_rate})"
+        )
+    if audio.channels != 1:
+        raise ConfigError(
+            "audio.channels must be 1 in v0; the pipeline processes mono and ALSA's "
+            "plughw plugin downmixes the gadget's stereo stream"
+        )
+    if not 1 <= audio.frame_ms <= 1_000:
+        raise ConfigError(f"audio.frame_ms must be between 1 and 1000 (got {audio.frame_ms})")
+    if (audio.sample_rate * audio.frame_ms) % 1_000 != 0:
+        raise ConfigError(
+            f"audio.frame_ms={audio.frame_ms} is not a whole number of samples at "
+            f"{audio.sample_rate} Hz; choose a frame length that is a multiple of "
+            "the sample period"
+        )
+
+
+def _validate_dialer(dialer: DialerConfig) -> None:
+    if not dialer.url:
+        raise ConfigError(
+            "dialer.url is required; set [dialer].url to the LAN base URL of the "
+            "helper app, for example http://192.168.1.20:8080"
+        )
+    _validate_url(dialer.url, "dialer.url")
+    if not dialer.token.strip():
+        raise ConfigError(
+            "dialer.token is required; set [dialer].token or "
+            "TELEPHONE_AGENT_DIALER__TOKEN to the helper's bearer token"
+        )
+    if not math.isfinite(dialer.timeout_s) or dialer.timeout_s <= 0:
+        raise ConfigError(f"dialer.timeout_s must be a positive number (got {dialer.timeout_s})")
+    if not 0 <= dialer.retries <= 5:
+        raise ConfigError(
+            f"dialer.retries must be between 0 and 5 (got {dialer.retries}); "
+            "retries delay the call and should stay bounded"
+        )
+
+
+def _validate_brain(brain: BrainConfig) -> None:
+    if brain.kind not in {"echo", "http"}:
+        raise ConfigError(f"brain.kind must be 'echo' or 'http' (got {brain.kind!r})")
+    if brain.max_tokens <= 0:
+        raise ConfigError(f"brain.max_tokens must be > 0 (got {brain.max_tokens})")
+    if not math.isfinite(brain.timeout_s) or brain.timeout_s <= 0:
+        raise ConfigError(f"brain.timeout_s must be a positive number (got {brain.timeout_s})")
+    if brain.kind == "http":
+        if not brain.base_url:
+            raise ConfigError(
+                "brain.base_url is required when brain.kind = 'http'; point it at "
+                "the API root, for example https://api.example.invalid/v1"
+            )
+        _validate_url(brain.base_url, "brain.base_url")
+        if not brain.model.strip():
+            raise ConfigError(
+                "brain.model is required when brain.kind = 'http'; set it to the "
+                "provider's model identifier"
+            )
+
+
+def _validate_agent(agent: AgentConfig) -> None:
+    if agent.max_call_seconds <= 0:
+        raise ConfigError(f"agent.max_call_seconds must be > 0 (got {agent.max_call_seconds})")
+    if not math.isfinite(agent.silence_timeout_s) or agent.silence_timeout_s <= 0:
+        raise ConfigError(
+            f"agent.silence_timeout_s must be a positive number (got {agent.silence_timeout_s})"
+        )
+    if not -100.0 <= agent.vad_threshold <= 0.0:
+        raise ConfigError(
+            "agent.vad_threshold must be a dBFS value between -100 and 0 "
+            f"(got {agent.vad_threshold})"
+        )
+    if not agent.language.strip():
+        raise ConfigError("agent.language is required; use a BCP-47 tag such as en-IN")
+
+
+def _validate_url(value: str, label: str) -> None:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ConfigError(f"{label} must be an absolute http:// or https:// URL (got {value!r})")
+
+
+def _build_section(cls: type[_T], raw: object, section: str) -> _T:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"[{section}] must be a TOML table")
+
+    allowed = {item.name for item in fields(cls)}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"unknown key(s) in [{section}]: {', '.join(unknown)}; "
+            f"expected {', '.join(sorted(allowed))}"
+        )
+
+    values: dict[str, object] = {}
+    for item in fields(cls):
+        if item.name in raw:
+            values[item.name] = _coerce_toml(raw[item.name], item.default, f"{section}.{item.name}")
+    return cls(**values)  # type: ignore[arg-type]
+
+
+def _coerce_toml(value: object, default: object, label: str) -> object:
+    if isinstance(default, str):
+        return _coerce_str(value, label)
+    if isinstance(default, int):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"{label} must be an integer (got {value!r})")
+        return value
+    if isinstance(default, float):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{label} must be a number (got {value!r})")
+        return float(value)
+    raise ConfigError(f"internal error: unsupported default type for {label}")
+
+
+def _coerce_str(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(f"{label} must be a string (got {value!r})")
+    return value
+
+
+def _apply_env(config: Config, env: Mapping[str, str]) -> Config:
+    section_types: dict[str, type[object]] = {
+        "audio": AudioConfig,
+        "dialer": DialerConfig,
+        "brain": BrainConfig,
+        "agent": AgentConfig,
+    }
+
+    for name, raw in sorted(env.items()):
+        if not name.startswith(_ENV_PREFIX):
+            continue
+        suffix = name[len(_ENV_PREFIX) :]
+        parts = [part.lower() for part in suffix.split("__")]
+
+        if len(parts) == 1:
+            if parts[0] != "phone_number":
+                raise ConfigError(
+                    f"{name} is not a valid override; use "
+                    "TELEPHONE_AGENT_PHONE_NUMBER or "
+                    "TELEPHONE_AGENT_<SECTION>__<FIELD>"
+                )
+            config = replace(config, phone_number=raw)
+            continue
+
+        if len(parts) != 2:
+            raise ConfigError(
+                f"{name} is not a valid override; use "
+                "TELEPHONE_AGENT_<SECTION>__<FIELD> with one nested level"
+            )
+
+        section, field_name = parts
+        if section not in section_types:
+            raise ConfigError(
+                f"{name} refers to unknown section {section!r}; "
+                f"expected one of {', '.join(sorted(section_types))}"
+            )
+        section_value = getattr(config, section)
+        section_fields = {item.name: item for item in fields(section_value)}
+        if field_name not in section_fields:
+            raise ConfigError(
+                f"{name} refers to unknown key {field_name!r} in [{section}]; "
+                f"expected one of {', '.join(sorted(section_fields))}"
+            )
+        coerced = _coerce_env(raw, section_fields[field_name].default, f"{section}.{field_name}")
+        updated = replace(section_value, **{field_name: coerced})
+        config = replace(config, **{section: updated})
+
+    return config
+
+
+def _coerce_env(raw: str, default: object, label: str) -> object:
+    if isinstance(default, str):
+        return raw
+    if isinstance(default, int):
+        try:
+            return int(raw, 10)
+        except ValueError as exc:
+            raise ConfigError(f"{label} must be an integer (got {raw!r})") from exc
+    if isinstance(default, float):
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise ConfigError(f"{label} must be a number (got {raw!r})") from exc
+    raise ConfigError(f"internal error: unsupported default type for {label}")

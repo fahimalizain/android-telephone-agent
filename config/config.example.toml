@@ -1,0 +1,69 @@
+# Reference configuration for the telephone agent.
+#
+# Copy this file to config/config.toml (or a path passed with --config) and
+# replace every placeholder. Never commit a populated file: phone numbers,
+# helper tokens, and provider API keys are secrets.
+#
+# Precedence is: dataclass defaults < this file < environment variables.
+# Environment overrides use TELEPHONE_AGENT_* with a double underscore between
+# section and key, for example TELEPHONE_AGENT_DIALER__TOKEN. Environment
+# values win, so the token here can be a harmless placeholder.
+
+# Destination in E.164 format. Optional when every dial/run invocation passes
+# --number. This is the fictional +1 555-555-0100 range.
+phone_number = "+15555550100"
+
+[audio]
+# ALSA card id of the USB gadget, not the bracketed description. `arecord -l`
+# prints a line such as:
+#   card 0: UAC1Gadget [USB Audio], device 0: USB Audio [USB Audio]
+# In that example the card id is "UAC1Gadget". Verify the value on your device.
+card = "UAC1Gadget"
+device = 0
+# The gadget itself runs at 48 kHz stereo. ALSA's plughw plugin resamples and
+# downmixes to this processing format, which is enough for the cellular codec.
+sample_rate = 16000
+channels = 1
+frame_ms = 20
+
+[dialer]
+# Base URL of the helper app on Phone A. Keep it on the LAN; do not port-forward.
+# Placeholder address and port.
+url = "http://192.168.1.20:8765"
+# Bearer token required by the helper. Prefer TELEPHONE_AGENT_DIALER__TOKEN over
+# storing a real token in this file.
+token = "replace-with-helper-token"
+timeout_s = 10.0
+# Retries apply only to HTTP 5xx and connection failures, never to 4xx.
+# Bounded to 5.
+retries = 2
+
+[brain]
+# "echo" returns a short echo and is intended for loopback testing.
+# "http" targets any OpenAI-compatible /chat/completions endpoint.
+kind = "echo"
+
+# The fields below are used only when kind = "http". Point base_url at the API
+# root, up to and including /v1. The client appends /chat/completions.
+base_url = "https://api.example.invalid/v1"
+api_key = "replace-with-api-key"
+model = "replace-with-model"
+system_prompt = """You are a concise voice assistant on a telephone call.
+Reply in one or two short sentences, in plain spoken language.
+Do not use markdown, lists, or stage directions."""
+max_tokens = 200
+timeout_s = 30.0
+
+[agent]
+# Reserved for an external scheduler (systemd timer, cron, or a future
+# controller). The reference runtime does not schedule calls itself.
+schedule = ""
+max_call_seconds = 300
+# Hang up after this much continuous silence with no active utterance. Ringing
+# time also counts because v0 has no answer detection.
+silence_timeout_s = 20.0
+# dBFS. Frames at or below this level are silence. Tune this in the room where
+# the Pi and Phone A will operate; -40 is a starting point, not a guarantee.
+vad_threshold = -40.0
+# BCP-47 tag used to label the call and passed to future speech adapters.
+language = "en-IN"

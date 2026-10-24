@@ -1,0 +1,67 @@
+name: Feature request
+description: Propose a change in behavior, documentation, hardware support, or tooling.
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project has a deliberately narrow scope. Read the design brief
+        (`docs/design-brief.md`) and the documentation index (`docs/README.md`)
+        before proposing a change.
+
+        Root, call recording, VoIP, and interception of an existing call are out of
+        scope. Proposals that require them will be closed.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you trying to solve? Describe the use case, not only the proposed implementation.
+      placeholder: A scheduled call cannot be moved to a later slot without editing the configuration.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the change you want, including any interface or documentation impact.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Choose the part of the project this request affects most.
+      options:
+        - Documentation
+        - USB gadget and audio routing
+        - Android setup or helper app
+        - Dialing and call control
+        - Voice agent runtime
+        - Scripts and systemd
+        - Power, thermal, or hardware
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or other designs have you considered, and why are they insufficient?
+  - type: textarea
+    id: hardware-impact
+    attributes:
+      label: Hardware and compatibility impact
+      description: Does this require a different phone, Pi model, hub, or Android version? Does it affect the USB gadget or call routing?
+      placeholder: Describe any device or OS requirement, or write "None identified".
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I read the design brief and believe this fits the documented scope.
+          required: true
+        - label: This request does not depend on root, call recording, VoIP, or interception of an existing call.
+          required: true
+        - label: I searched existing issues and did not find a duplicate.
+          required: true

@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Reference manifest fragment for android-helper.
+
+  This file is not a drop-in replacement for a generated project manifest; merge
+  the permission and service entries into app/src/main/AndroidManifest.xml. See
+  android-helper/README.md.
+
+  Package name: this project uses dev.example.dialhelper as a placeholder. Change
+  it in app/build.gradle.kts (namespace and applicationId) and in the `package`
+  declaration at the top of DialService.kt. With Android Gradle Plugin 8 and
+  later, the package is not declared in the manifest; the relative name
+  ".DialService" resolves against the Gradle namespace.
+
+  This is a reference implementation, not production-hardened code.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <!-- Required to place the call through TelecomManager.placeCall(). -->
+  <uses-permission android:name="android.permission.CALL_PHONE" />
+
+  <!--
+    Required by TelecomManager.getCallCapablePhoneAccounts() and
+    getPhoneAccount() on most Android builds, unless the app is the default
+    dialer. Used only to choose the agent SIM and read its account label; it
+    does not grant call audio, call recording, or call log access.
+  -->
+  <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+  <!--
+    Best-effort hangup with TelecomManager.endCall(). Depending on the build,
+    endCall() may still be refused for apps that are not the default dialer.
+  -->
+  <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+
+  <!-- Required to open the LAN listening socket. No outbound internet is used. -->
+  <uses-permission android:name="android.permission.INTERNET" />
+
+  <!-- Foreground service so the socket survives while the phone is idle. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+  <!-- Runtime permission on Android 13+ for the ongoing notification. -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <!-- Optional: only needed if a partial wake lock is added. -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+  <!-- Optional: only needed if the boot receiver below is enabled. -->
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+  <application
+    android:allowBackup="false"
+    android:label="@string/app_name"
+    android:supportsRtl="true">
+
+    <!--
+      specialUse is the correct type for a non-dialer app that exposes a local
+      control endpoint. The phoneCall type is reserved for apps that own the
+      calling experience (default dialer or a self-managed ConnectionService).
+
+      Exported so `adb shell am start-foreground-service` can start it during
+      provisioning. The service ignores all intent data; its only control
+      surface is the token-protected LAN API. A hardened build should set this
+      to false and start the service from a launcher activity or boot receiver.
+    -->
+    <service
+      android:name=".DialService"
+      android:exported="true"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Personal LAN endpoint that places outbound calls for a local voice agent" />
+    </service>
+
+    <!--
+      Optional: start the helper after a reboot. Without this, the service must
+      already be running to receive a request; a phone that rebooted will not
+      answer until the service is started again. Android may block a
+      foreground-service start from BOOT_COMPLETED; verify on your device.
+      Uncomment to enable.
+    -->
+    <!--
+    <receiver
+      android:name=".BootReceiver"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+      </intent-filter>
+    </receiver>
+    -->
+  </application>
+</manifest>
