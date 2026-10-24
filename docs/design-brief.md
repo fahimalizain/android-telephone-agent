@@ -77,6 +77,22 @@ receives the downlink. Owning the headset means owning both directions.
 
 Caller ID seen by Phone B is SIM A's number. Phone B needs no software.
 
+### Supported alternative: Bluetooth HFP
+
+USB remains the canonical audio path, but it is not the only supported one. The host can
+instead present itself as a Bluetooth HFP hands-free unit (HF), with Phone A as the audio
+gateway (AG). PipeWire exposes the call as a SCO source (downlink) and SCO sink (uplink),
+and the agent captures and plays those nodes with `pw-record` and `pw-play`. The phone can
+charge from a separate supply because its USB port is not the audio link.
+
+The trade-offs are pairing and reconnection, call-scoped SCO nodes, a shared 2.4 GHz radio,
+and the requirement that the agent run in the same user session as PipeWire and
+WirePlumber. Dialing and hangup still go through the LAN helper; HFP AT call control is not
+implemented. The path was validated on a Linux laptop with a Galaxy A23 and a Google Meet
+call, not on the Pi Zero 2 W and not on a PSTN call. See
+[Bluetooth HFP](./bluetooth-hfp.md) and
+[ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
+
 ## 5. Canonical hardware
 
 | Role | Device | Notes |
@@ -109,7 +125,7 @@ available for gadget mode (the Pi 5 cannot do USB device mode).
 - Phone A runs Samsung's Protect battery (80–85% depending on One UI build) to reduce
   swelling. The phone stands upright, without a case, in ventilated space.
 
-## 7. USB gadget
+## 7. USB gadget (canonical audio path)
 
 - Implemented with configfs and the `f_uac1` function.
 - Format: 48 kHz, 2 channels, 16-bit, `MaxPower` 250 (500 mA), `bcdUSB` 0x0200.
@@ -133,7 +149,8 @@ This must be verified with a loopback test before the agent is connected.
 
 ## 8. Dialing and call control
 
-Because Phone A is the USB host, `adb` over USB is unavailable. Two supported paths:
+Because Phone A is the USB host in the canonical topology, `adb` over USB is unavailable.
+Two supported paths:
 
 1. **Reference path (preferred): a small helper app on Phone A.**
    - Foreground service, battery optimization exempt.
@@ -157,7 +174,8 @@ Tasker or MacroDroid with a webhook trigger is an acceptable no-code fallback.
 
 - Protect battery ON.
 - Developer options → Stay awake while charging ON.
-- Developer options → "Disable USB audio routing" OFF.
+- Developer options → "Disable USB audio routing" OFF (USB path; for Bluetooth HFP,
+  enable **Calls and audio** for the host instead).
 - Auto restart OFF (Settings → General management → Reset).
 - Play Store auto-update OFF; software update auto-download OFF.
 - SIM manager → default for calls = agent SIM; VoLTE ON.
@@ -176,6 +194,10 @@ gadget capture (48 kHz) → downmix/resample to 16 kHz mono
   → streaming TTS (sentence chunks)
   → resample to 48 kHz → gadget playback
 ```
+
+The pipeline is transport-neutral. The USB gadget runs at 48 kHz; the Bluetooth HFP SCO
+link is 16 kHz with mSBC or 8 kHz with CVSD, and the boundary resamples to the same
+16 kHz mono processing format.
 
 Requirements:
 
@@ -217,8 +239,8 @@ gadget's 48 kHz rate. Do not optimize for hi-fi; optimize for latency and turn-t
 - Daily heartbeat to Telegram/ntfy: call placed, duration, outcome. Alert if the call
   did not connect.
 - Failure modes to handle: no cellular signal, phone rebooted, USB gadget not
-  enumerated, helper app killed, provider outage, power cut, Wi-Fi down, SIM out of
-  credit, call answered by voicemail.
+  enumerated, Bluetooth disconnected or SCO nodes missing, helper app killed, provider
+  outage, power cut, Wi-Fi down, SIM out of credit, call answered by voicemail.
 - Weekly review of logs; monthly check of the phone battery for swelling.
 
 ## 12. Security, privacy, and legal
@@ -263,6 +285,7 @@ CHANGELOG.md
 Makefile
 .env.example
 config/config.example.toml
+config/wireplumber/51-bt-headset.conf
 docs/
   design-brief.md
   architecture.md
@@ -270,6 +293,7 @@ docs/
   bom.csv
   power-and-thermal.md
   raspberry-pi-setup.md
+  bluetooth-hfp.md
   android-setup.md
   dial-helper.md
   voice-agent.md
@@ -280,15 +304,20 @@ docs/
   troubleshooting.md
   faq.md
   glossary.md
-  decisions/0001-...md .. 0005-...md
+  decisions/0001-...md .. 0006-...md
 scripts/
   uac-gadget.sh
   install.sh
   audio-loopback-test.sh
+  bluetooth-setup.sh
+  bluetooth-check.sh
+  bluetooth-audio-test.sh
   dial.sh
   systemd/uac-gadget.service
   systemd/telephone-agent.service
   systemd/telephone-agent.timer
+  systemd/telephone-agent-bluetooth.service
+  systemd/telephone-agent-bluetooth.timer
 agent/
   pyproject.toml
   README.md

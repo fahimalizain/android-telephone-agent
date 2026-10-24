@@ -25,19 +25,22 @@ nothing is installed or configured on the receiving side. See the [design brief]
 
 ## Can I use any Android phone, including an old one?
 
-The phone needs USB OTG (USB-C on the canonical device), a USB audio class implementation that routes
-call audio, and an Android version that can run the helper with the required permissions. The canonical
-device is a Samsung Galaxy A23 4G, and other devices vary; verify on your device. An old phone can work
-as a dedicated device if it meets those requirements and its battery is healthy, but a worn battery or an
-older USB implementation may make it unreliable. See [Android setup](./android-setup.md) and
-[hardware](./hardware.md).
+For the canonical USB path, the phone needs USB OTG (USB-C on the canonical device), a USB
+audio class implementation that routes call audio, and an Android version that can run the
+helper with the required permissions. For the Bluetooth alternative, it needs HFP support
+and the **Calls and audio** setting; the Galaxy A23 is validated over HFP, but other devices
+vary. An old phone can work as a dedicated device if it meets the requirements for the
+chosen transport and its battery is healthy, but a worn battery or an older USB/Bluetooth
+implementation may make it unreliable. See [Android setup](./android-setup.md),
+[Bluetooth HFP](./bluetooth-hfp.md), and [hardware](./hardware.md).
 
 ## Why a Raspberry Pi?
 
 The Pi Zero 2 W is small, inexpensive, runs Linux and Python, and its micro-USB port supports USB device
-mode through `dwc2`. That lets it appear as a USB audio gadget, which is the core of the design. A Pi 4
-Model B is a supported alternative; the Pi 5 cannot act as a USB device. See
-[Raspberry Pi setup](./raspberry-pi-setup.md).
+mode through `dwc2`. That lets it appear as a USB audio gadget, the canonical path. Bluetooth HFP is a
+supported alternative that does not need USB device mode. A Pi 4 Model B is a supported alternative; the
+Pi 5 cannot act as a USB device. See [Raspberry Pi setup](./raspberry-pi-setup.md) and
+[Bluetooth HFP](./bluetooth-hfp.md).
 
 ## Can it run on the phone itself?
 
@@ -115,19 +118,26 @@ the Pi can reach it. Keep the token in a root-readable environment file, rotate 
 APK, and never port-forward the endpoint. Plain HTTP is acceptable only on a trusted LAN; use a separate
 VLAN or TLS on a shared network. See [operations](./operations.md).
 
-## Why not Bluetooth?
+## Can I use Bluetooth instead of USB?
 
-Bluetooth headset profiles are designed for voice communication but add codec negotiation, pairing and
-reconnect fragility, battery drain, and Android routing quirks. Latency and microphone quality also vary
-by profile and device. A wired USB audio gadget gives explicit playback and capture endpoints and a
-stable enumeration path. Verify Bluetooth behavior on your device if you experiment. See
-[hardware](./hardware.md).
+Yes. Bluetooth HFP is a supported alternative transport: the Linux host acts as the
+hands-free unit (HF), Phone A as the audio gateway (AG), and PipeWire exposes the call as
+a SCO source and sink. USB remains the default and canonical path. The caveats are that
+pairing and reconnection add failure modes, SCO nodes exist only during a call, the agent
+must run in the same user session as PipeWire/WirePlumber, and Bluetooth shares 2.4 GHz
+spectrum with Wi-Fi. mSBC gives a 16 kHz link, but the cellular codec still caps fidelity.
+Dialing and hangup still go through the LAN helper. The path was validated on a laptop
+with a Galaxy A23 and a Google Meet call, not on a Pi Zero 2 W or a PSTN call. See
+[Bluetooth HFP](./bluetooth-hfp.md) and
+[ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
 
 ## Why not a Raspberry Pi 5?
 
 The Pi 5 cannot operate as a USB device, so it cannot present the UAC gadget to the phone. Use a Pi Zero
-2 W, or a Pi 4 Model B powered through the GPIO header so its USB-C port remains available. See
-[Raspberry Pi setup](./raspberry-pi-setup.md).
+2 W, or a Pi 4 Model B powered through the GPIO header so its USB-C port remains available. A Pi 5 could
+use the Bluetooth HFP alternative in principle, but that path is unverified on a Pi 5 and is not the
+canonical build. See [Raspberry Pi setup](./raspberry-pi-setup.md) and
+[Bluetooth HFP](./bluetooth-hfp.md).
 
 ## What if the phone reboots?
 
@@ -146,6 +156,7 @@ rather than placed late. Test the new slot with a supervised call. See [operatio
 ## Related documents
 
 [Design brief](./design-brief.md), [hardware](./hardware.md),
-[Raspberry Pi setup](./raspberry-pi-setup.md), [Android setup](./android-setup.md),
-[operations](./operations.md), [runbook](./runbook.md), [troubleshooting](./troubleshooting.md), and the
+[Raspberry Pi setup](./raspberry-pi-setup.md), [Bluetooth HFP](./bluetooth-hfp.md),
+[Android setup](./android-setup.md), [operations](./operations.md), [runbook](./runbook.md),
+[troubleshooting](./troubleshooting.md), and the
 [service unit](../scripts/systemd/telephone-agent.service).

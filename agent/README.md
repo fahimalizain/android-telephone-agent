@@ -3,7 +3,8 @@
 This directory contains the reference Python runtime for the outbound call agent
 described in the [design brief](../docs/design-brief.md). It runs on the
 Raspberry Pi next to Phone A, captures and plays audio through the USB Audio
-Class gadget, and asks a small LAN helper to place and end the cellular call.
+Class gadget or a Bluetooth HFP SCO link, and asks a small LAN helper to place
+and end the cellular call.
 
 The runtime is deliberately small. It uses only the Python standard library at
 runtime; `pytest` and `ruff` are development dependencies. It is a scaffold for
@@ -14,27 +15,52 @@ sections below explain exactly where those pieces belong.
 ## Prerequisites
 
 - Raspberry Pi Zero 2 W or Pi 4 Model B running Raspberry Pi OS Lite 64-bit
-  (Bookworm or later), with the USB gadget configured and enumerating.
+  (Bookworm or later), with the USB gadget configured and enumerating, or a
+  Linux host with PipeWire and WirePlumber for the Bluetooth HFP alternative.
 - Python 3.11 or later. Check with `python3 --version`.
-- ALSA utilities, which provide `arecord` and `aplay`:
+- For the USB backend, ALSA utilities, which provide `arecord` and `aplay`:
 
   ```bash
   sudo apt update
   sudo apt install -y python3-venv alsa-utils
   ```
 
+- For the Bluetooth backend, PipeWire, WirePlumber, and the PipeWire
+  command-line tools `pw-record`, `pw-play`, and `pw-dump`, plus `bluetoothctl`
+  for pairing and link checks. On Debian and Ubuntu the tools are in
+  `pipewire-bin`; package names vary by distribution. Verify:
+
+  ```bash
+  command -v pw-record pw-play pw-dump wpctl
+  ```
+
+  The host must run WirePlumber with the HFP hands-free role enabled, and Phone A
+  must be paired, trusted, and set to **Calls and audio**. See
+  [Bluetooth HFP](../docs/bluetooth-hfp.md) for the WirePlumber fragment, pairing,
+  and SCO verification.
+- The agent must run as the same user as PipeWire and WirePlumber. A system
+  service does not share the user's session, so it will not see the SCO nodes.
+  For a headless install, run a systemd user service and enable lingering; see
+  the systemd section below.
 - The phone-side helper app reachable on the LAN with a bearer token. The
-  reference HTTP contract is documented in `telephone_agent/dialer.py`: `GET
-  /health`, `POST /call`, and `POST /hangup`.
-- Phone A configured to route call audio to the USB headset. On the phone,
-  Developer options must not disable USB audio routing. Verify routing with the
-  hardware loopback procedure before relying on the agent.
+  reference HTTP contract is documented in `telephone_agent/dialer.py`:
+  `GET /health`, `POST /call`, and `POST /hangup`.
+- Phone A configured to route call audio to the USB headset, or to the Bluetooth
+  host with **Calls and audio** enabled. For USB, Developer options must not
+  disable USB audio routing. Verify routing with the hardware loopback procedure
+  before relying on the agent.
 - For `brain.kind = "http"`, network access to an OpenAI-compatible endpoint.
 
-The gadget's ALSA direction is inverted relative to a normal sound card.
+The USB gadget's ALSA direction is inverted relative to a normal sound card.
 Recording from the gadget card receives the remote party; playing to the gadget
 card sends audio to Phone A's uplink. The runtime treats those operations as
 "capture" and "play" and does not expose the inversion to the call loop.
+
+The Bluetooth SCO path is not inverted. The `api.bluez5.sco.source` node
+(`bluez_input...`) is the downlink to capture, and the `api.bluez5.sco.sink` node
+(`bluez_output...`) is the uplink to play. The runtime discovers those nodes by
+the phone's Bluetooth address and factory name because the `.<id>` suffix can
+change between connections.
 
 ## Install
 
@@ -92,7 +118,9 @@ Environment overrides use a double underscore between section and key:
 
 ```bash
 export TELEPHONE_AGENT_DIALER__TOKEN='...'
-export TELEPHONE_AGENT_AUDIO__CARD='UAC1Gadget'
+export TELEPHONE_AGENT_AUDIO__BACKEND='pipewire'
+export TELEPHONE_AGENT_AUDIO__BLUETOOTH_ADDRESS='AA:BB:CC:DD:EE:FF'
+# For USB, use BACKEND=alsa and CARD=UAC1Gadget instead.
 export TELEPHONE_AGENT_BRAIN__KIND='http'
 ```
 
@@ -115,9 +143,12 @@ actionable message.
 | Section | Key | Default | Description |
 |---|---|---|---|
 | top level | `phone_number` | empty | Destination in E.164 form. Optional for `doctor` and `selftest`; required for `dial`/`run` unless `--number` is passed. |
-| `audio` | `card` | required | ALSA card id from `arecord -l`, the token after `card N:` rather than the bracketed description. |
-| `audio` | `device` | `0` | ALSA device index. |
-| `audio` | `sample_rate` | `16000` | Processing rate in Hz, 8000-48000. `plughw` resamples the gadget's 48 kHz stream. |
+| `audio` | `backend` | `alsa` | `alsa` selects the USB Audio Class gadget; `pipewire` selects Bluetooth HFP through PipeWire. |
+| `audio` | `card` | required for `alsa` | ALSA card id from `arecord -l`, the token after `card N:` rather than the bracketed description. Ignored when `backend = "pipewire"`. |
+| `audio` | `device` | `0` | ALSA device index. Used only when `backend = "alsa"`. |
+| `audio` | `bluetooth_address` | required for `pipewire` | Phone A's Bluetooth address, six colon-separated hex octets, for example `AA:BB:CC:DD:EE:FF`. |
+| `audio` | `node_timeout_s` | `30.0` | Maximum wait for the Bluetooth SCO nodes after a call is placed. The nodes exist only while a call or SCO link is active. |
+| `audio` | `sample_rate` | `16000` | Processing rate in Hz, 8000-48000. `plughw` resamples the USB gadget's 48 kHz stream; PipeWire resamples the SCO link, which is 16 kHz with mSBC or 8 kHz with CVSD. |
 | `audio` | `channels` | `1` | Must be 1 in v0; the pipeline is mono. |
 | `audio` | `frame_ms` | `20` | Capture frame duration. Must describe a whole number of samples. |
 | `dialer` | `url` | required | LAN base URL of the helper, without a trailing endpoint path. |
@@ -137,6 +168,20 @@ actionable message.
 | `agent` | `vad_threshold` | `-40.0` | Speech threshold in dBFS, between -100 and 0. Tune on the device. |
 | `agent` | `language` | `en` | BCP-47 tag reserved for speech adapters. |
 
+For Bluetooth HFP, the audio section looks like this:
+
+```toml
+[audio]
+backend = "pipewire"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
+node_timeout_s = 30.0
+sample_rate = 16000
+channels = 1
+frame_ms = 20
+```
+
+Leave `backend` at its `alsa` default, with `card` and `device`, for the USB gadget.
+
 Example TOML values are placeholders only. A real phone number, helper token, or
 API key must not enter the repository.
 
@@ -152,11 +197,15 @@ console-script path from systemd. From the repository root, `make doctor` and
 telephone-agent --config ../config/config.toml doctor
 ```
 
-This loads the configuration, lists capture devices from `arecord -l`, checks
-that the configured card is present, and calls the helper's `/health` endpoint.
-It never prints the bearer token or API key. Exit status is 0 when every check
-passes, 1 when a hardware or helper check fails, and 2 for a configuration
-error.
+This loads the configuration, checks the selected audio path, and calls the
+helper's `/health` endpoint. For `backend = "alsa"` it lists capture devices
+from `arecord -l` and verifies that the configured card is present. For
+`backend = "pipewire"` it checks that `pw-record`, `pw-play`, and `pw-dump` are
+installed, then looks for the SCO nodes; when the phone is idle, it reports that
+the nodes are not present and does not treat that as a failure. Run it during a
+call to see the downlink and uplink node names. It never prints the bearer token
+or API key. Exit status is 0 when every check passes, 1 when a hardware, audio,
+or helper check fails, and 2 for a configuration error.
 
 ### `selftest`
 
@@ -164,11 +213,18 @@ error.
 telephone-agent --config ../config/config.toml selftest
 ```
 
-Records two seconds from the gadget capture path and reports frame count,
-duration, RMS, dBFS, and peak amplitude. It does not place a call and does not
-play audio. Digital silence suggests a muted microphone, the wrong card, or a
-gadget that has not enumerated. This only tests the Pi's capture path; it does
-not prove Android is routing call audio to the headset.
+Records two seconds from the configured call downlink and reports frame count,
+duration, RMS, dBFS, and peak amplitude. For USB it reads the gadget capture
+path. For Bluetooth it reads the SCO source, which exists only during a call;
+the command waits up to `audio.node_timeout_s` for the link, so place a call
+first. It does not place a call and does not play audio. Digital silence
+suggests a muted microphone, the wrong device, a call that is not routed to the
+headset, or a Bluetooth SCO link that is not up. This only tests the host's
+capture path; it does not prove Android is routing call audio to the headset.
+
+For a manual Bluetooth check during a supervised call, use
+`scripts/bluetooth-audio-test.sh list`, `record`, and `tone`; see
+[Bluetooth HFP](../docs/bluetooth-hfp.md), section 8.
 
 ### `dial`
 
@@ -306,7 +362,7 @@ Description=telephone-agent daily call
 
 [Timer]
 OnCalendar=*-*-* 09:00:00
-Persistent=true
+Persistent=false
 RandomizedDelaySec=30
 
 [Install]
@@ -324,6 +380,37 @@ The unit runs as `pi`; that user must be able to open the ALSA device (membershi
 in the `audio` group) and must have read access to the configuration and
 environment files. `EnvironmentFile` is optional (`-` prefix), so the service
 still starts if you use only the TOML file.
+
+### Bluetooth HFP: use a user service
+
+The unit above is a system service, even though it runs as `pi`. For
+`backend = "pipewire"` it will not work unchanged: PipeWire and WirePlumber run
+in the user's session, and a system service has a different session bus and
+`XDG_RUNTIME_DIR`. Run the Bluetooth path as a systemd **user** service in the
+same account that owns the PipeWire session.
+
+The repository ships user units in `scripts/systemd/`:
+`telephone-agent-bluetooth.service` and `telephone-agent-bluetooth.timer`.
+They assume the repository is at `~/android-telephone-agent`; edit the
+`%h`-based paths (`WorkingDirectory`, `EnvironmentFile`, and `ExecStart`) if it is
+elsewhere. Install them under the user unit directory and enable the timer:
+
+```bash
+mkdir -p ~/.config/systemd/user
+install -m644 scripts/systemd/telephone-agent-bluetooth.service \
+  ~/.config/systemd/user/
+install -m644 scripts/systemd/telephone-agent-bluetooth.timer \
+  ~/.config/systemd/user/
+sudo loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+systemctl --user enable --now telephone-agent-bluetooth.timer
+journalctl --user -u telephone-agent-bluetooth.service -n 100 --no-pager
+```
+
+Enable lingering on a headless host so the user manager and PipeWire keep
+running when no one is logged in. Do not enable the system USB unit and the
+Bluetooth user unit for the same call slot. The full deployment steps are in
+[Bluetooth HFP](../docs/bluetooth-hfp.md), section 10.
 
 The design brief targets 24/7 operation with a hardware watchdog and volatile
 journald storage. Those are host-level settings; the one-shot unit above does
@@ -376,9 +463,17 @@ workflow runs `ruff check` and `pytest` on Python 3.11, 3.12, and 3.13. Python
 - **Hangup may be unavailable.** Android restricts `TelecomManager.endCall()` on
   modern releases. If the helper cannot end the call, the remote party must hang
   up and the service cannot guarantee prompt teardown.
+- **Bluetooth HFP is an alternative, not the default.** It requires PipeWire and
+  WirePlumber in the same user session, and the SCO nodes exist only during a
+  call. The USB gadget remains the default and the more deterministic path.
+- **Bluetooth validation is limited.** The path was validated on a Linux laptop
+  with a Galaxy A23 and a Google Meet call. A PSTN call over Bluetooth and the Pi
+  Zero 2 W were not tested; the Pi is expected to work but is unverified.
+- **No HFP call control.** The agent does not send `ATD`, `ATA`, or `CHUP`.
+  Dialing and hangup still require the LAN helper and a reachable phone.
 - **The cellular codec caps fidelity.** AMR-NB, AMR-WB, or EVS quality is the
-  limit regardless of the gadget's 48 kHz rate. Optimise for turn-taking and
-  latency, not hi-fi.
+  limit regardless of the gadget's 48 kHz rate or the SCO link's 16 kHz mSBC
+  rate. Optimise for turn-taking and latency, not hi-fi.
 - **Pi Zero 2 W is CPU constrained.** Local speech models are not comfortable on
   this board; the design brief treats Whisper/Piper-class local models as a
   Pi 4/5 stretch goal.
@@ -402,7 +497,11 @@ journalctl -u telephone-agent.service -n 100 --no-pager
 | `arecord -l` shows no gadget | Check the USB gadget service, `dtoverlay=dwc2,dr_mode=peripheral`, `modules-load=dwc2,libcomposite`, the cable, and the hub. Re-enumeration after a phone reboot is a known failure mode. |
 | Configured card not found | Use the ALSA card id (for example `UAC1Gadget` or `Headset`), not the bracketed description. Card ids are case-sensitive. |
 | `Device or resource busy` | Another process has the card open. Stop it and rerun `selftest`. On a desktop image, suspend or stop the desktop audio stack. |
-| `selftest` reports digital silence | The gadget is capturing but Phone A is not routing call audio, or the phone microphone is muted. Test the routing with USB-C earphones before changing the agent. |
+| `pw-record` or `pw-play` not found | Install PipeWire's command-line tools (the `pipewire-bin` package on Debian and Ubuntu), then rerun `doctor`. |
+| `pw-dump` cannot connect to PipeWire | The agent is not in the PipeWire user session. Run it as the same user, use a user service, and enable lingering; check `XDG_RUNTIME_DIR`. |
+| `doctor` says Bluetooth SCO nodes are not present | This is normal while the phone is idle. Place a call, confirm the phone routes call audio to Bluetooth, and rerun during the call. |
+| Bluetooth node target is missing after reconnect | The `.<id>` suffix changed. Do not hard-code it; the runtime discovers nodes by address and factory name. Use `pw-dump` or `scripts/bluetooth-check.sh` to see the current names. |
+| `selftest` reports digital silence | For USB, the gadget is capturing but Phone A is not routing call audio, or the phone microphone is muted. For Bluetooth, no call is active or the phone is not routing call audio to the host. Test the route during a call before changing the agent. |
 | Helper returns 401/403 | The bearer token does not match. Set `TELEPHONE_AGENT_DIALER__TOKEN` and restart the service. |
 | Helper returns 404 | The helper does not implement the reference endpoint path. Check `/health`, `/call`, and `/hangup` in `telephone_agent/dialer.py`. |
 | Helper returns 5xx | The helper app or phone is unhealthy. The dialer retries a bounded number of times, then fails. Check the helper's logs and the phone's battery optimisation setting. |
@@ -440,7 +539,7 @@ agent/
   telephone_agent/
     __main__.py           doctor, dial, run, selftest
     config.py             TOML loading, environment overrides, validation
-    audio.py              arecord/aplay lifecycle through plughw
+    audio.py              arecord/aplay and pw-record/pw-play backends, SCO discovery
     vad.py                RMS, dBFS, energy endpointer
     dialer.py             helper HTTP client with retries and idempotency
     brain.py              Brain protocol, EchoBrain, HttpBrain

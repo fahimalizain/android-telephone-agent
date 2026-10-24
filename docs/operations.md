@@ -26,6 +26,13 @@ watchdog so a hung kernel reboots the Pi; a watchdog reboot during a slot still 
 Do not add `Restart=always`: restarting a unit that dials would redial. See the
 [design brief](./design-brief.md) for the architecture constraints.
 
+For the Bluetooth HFP alternative, the audio path is the host's HFP SCO link with Phone A
+rather than the USB gadget. Scheduling, the LAN helper, provider calls, alerting, and the
+one-call-at-a-time rule are unchanged. The USB-specific checks below (gadget enumeration
+and UAC card) do not apply; use the adapter roles, phone connection, and SCO nodes from
+[Bluetooth HFP](./bluetooth-hfp.md) instead. The agent must run in the PipeWire user
+session, so use the Bluetooth user units rather than the root USB unit.
+
 ## 2. Daily call timeline
 
 | Time | Stage | Action | Failure handling |
@@ -69,6 +76,12 @@ export PROVIDER_HEALTH_URL="https://api.example.com/health"  # replace
 A hard failure aborts the call; a warning is logged and included in the heartbeat. The provider probe
 may be an unauthenticated status endpoint or the agent's authenticated check; never put an API key on
 a command line where local users can read it from the process list.
+
+For `audio.backend = "pipewire"`, replace the two gadget checks with the Bluetooth HFP checks:
+the adapter advertises Headset (0x1108) and Handsfree (0x111e), Phone A is connected, and
+both SCO nodes exist during a call. `scripts/bluetooth-check.sh <mac>` covers all three;
+see [Bluetooth HFP](./bluetooth-hfp.md). The helper, time, provider, disk, temperature,
+and throttling checks are unchanged.
 
 Time sync matters because the Pi Zero 2 W has no battery-backed clock. After a power cut, provider
 request signing and TLS validation can fail until NTP succeeds. The reference helper's health response
@@ -278,6 +291,7 @@ call with two-way audio; record the date and cause. With a prepared card this ta
 ## Related documents
 
 [Hardware](./hardware.md), [Raspberry Pi setup](./raspberry-pi-setup.md),
-[Android setup](./android-setup.md), [runbook](./runbook.md), [troubleshooting](./troubleshooting.md),
-the [service unit](../scripts/systemd/telephone-agent.service), and the
+[Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md), [runbook](./runbook.md),
+[troubleshooting](./troubleshooting.md), the
+[service unit](../scripts/systemd/telephone-agent.service), and the
 [timer](../scripts/systemd/telephone-agent.timer).

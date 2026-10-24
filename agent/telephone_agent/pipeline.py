@@ -30,7 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from .audio import GadgetAudio
+from .audio import AudioDevice
 from .brain import Brain
 from .config import ensure_e164
 from .dialer import Dialer, mask_number
@@ -111,7 +111,7 @@ class CallSession:
     """Run one outbound call from dialing through hangup.
 
     Args:
-        audio: Gadget capture and playback.
+        audio: Call audio backend (USB gadget or Bluetooth HFP).
         dialer: Helper client that places and ends the call.
         brain: Text-in, text-out conversation brain.
         number: E.164 destination number.
@@ -131,7 +131,7 @@ class CallSession:
     def __init__(
         self,
         *,
-        audio: GadgetAudio,
+        audio: AudioDevice,
         dialer: Dialer,
         brain: Brain,
         number: str,
@@ -337,7 +337,7 @@ class CallSession:
         #  1. start playback in a worker thread or an incremental sink;
         #  2. keep consuming `frames()` and feed the endpointer;
         #  3. if the caller starts speaking, call a new
-        #     `GadgetAudio.stop_playback()` that terminates the aplay process.
+        #     `audio.stop_playback()` that terminates the player process.
         # Playback must remain at the audio device's rate and must be drained
         # before the next reply is queued.
         self.audio.play(bytes(pcm))

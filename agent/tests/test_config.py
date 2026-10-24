@@ -199,6 +199,127 @@ def test_missing_config_file_is_actionable(tmp_path: Path) -> None:
         load(missing, env={})
 
 
+def test_audio_config_keeps_positional_field_order_compatible() -> None:
+    audio = AudioConfig("Card", 0, 16_000, 1, 20)
+
+    assert audio.card == "Card"
+    assert audio.device == 0
+    assert audio.sample_rate == 16_000
+    assert audio.channels == 1
+    assert audio.frame_ms == 20
+    assert audio.backend == "alsa"
+    assert audio.bluetooth_address == ""
+    assert audio.node_timeout_s == 30.0
+
+
+def test_bluetooth_audio_config_is_accepted(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+[audio]
+backend = "pipewire"
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
+node_timeout_s = 12.5
+
+[dialer]
+url = "http://127.0.0.1:8080"
+token = "test-token"
+""",
+    )
+
+    config = load(path, env={})
+
+    assert config.audio.backend == "pipewire"
+    assert config.audio.bluetooth_address == "AA:BB:CC:DD:EE:FF"
+    assert config.audio.node_timeout_s == 12.5
+    assert config.audio.card == ""
+
+
+def test_bluetooth_backend_requires_an_address(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+[audio]
+backend = "pipewire"
+
+[dialer]
+url = "http://127.0.0.1:8080"
+token = "test-token"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="bluetooth_address is required"):
+        load(path, env={})
+
+
+def test_bluetooth_address_is_validated(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+[audio]
+backend = "pipewire"
+bluetooth_address = "not-a-mac"
+
+[dialer]
+url = "http://127.0.0.1:8080"
+token = "test-token"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="six colon-separated hex octets"):
+        load(path, env={})
+
+
+def test_unknown_audio_backend_is_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+[audio]
+backend = "jack"
+card = "Gadget"
+
+[dialer]
+url = "http://127.0.0.1:8080"
+token = "test-token"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="audio.backend"):
+        load(path, env={})
+
+
+def test_node_timeout_must_be_positive(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+[audio]
+card = "Gadget"
+node_timeout_s = 0
+
+[dialer]
+url = "http://127.0.0.1:8080"
+token = "test-token"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="node_timeout_s"):
+        load(path, env={})
+
+
+def test_environment_can_select_bluetooth(tmp_path: Path) -> None:
+    env = {
+        "TELEPHONE_AGENT_AUDIO__BACKEND": "pipewire",
+        "TELEPHONE_AGENT_AUDIO__BLUETOOTH_ADDRESS": "AA:BB:CC:DD:EE:FF",
+        "TELEPHONE_AGENT_AUDIO__NODE_TIMEOUT_S": "5",
+    }
+
+    config = load(_write(tmp_path), env=env)
+
+    assert config.audio.backend == "pipewire"
+    assert config.audio.bluetooth_address == "AA:BB:CC:DD:EE:FF"
+    assert config.audio.node_timeout_s == 5.0
+
+
 def test_invalid_toml_is_reported(tmp_path: Path) -> None:
     path = _write(tmp_path, "[audio\ncard = 'x'\n")
 

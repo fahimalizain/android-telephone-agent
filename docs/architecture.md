@@ -20,7 +20,8 @@ modification, and unattended operation from a small, low-power device.
 
 In scope:
 
-- The USB audio path between Phone A and the Pi, in both directions.
+- The USB audio path between Phone A and the Pi, in both directions, and the
+  supported Bluetooth HFP alternative.
 - Scheduling, dialing, call-progress tracking, and hangup.
 - Capture, VAD, STT, LLM, TTS, and playback.
 - Power, cooling, network, failure handling, and observability.
@@ -86,9 +87,66 @@ rules; it affects only calls active while the gadget is attached and selected.
 **No telephony control.** Dialing, SIM selection, and hangup stay in Android. A helper
 app on Phone A calls `TelecomManager.placeCall()` after a LAN request; on dual-SIM it
 must pass the agent SIM's phone account handle or One UI may show a SIM picker. See
-[Dial helper](./dial-helper.md). Because the phone is the USB host, `adb` over the
-cable is unavailable; wireless debugging does not survive reboots reliably enough for
-unattended use. The helper is the reference path.
+[Dial helper](./dial-helper.md). In the canonical USB topology, because the phone is the
+USB host, `adb` over the cable is unavailable; wireless debugging does not survive
+reboots reliably enough for unattended use. The helper is the reference path.
+
+### 4.1 Bluetooth HFP variant
+
+A second transport is supported when USB device mode is unavailable or unsuitable. The
+Linux host advertises the Hands-Free Profile **hands-free unit (HF)** role and Phone A is
+the **audio gateway (AG)**. Android already routes call audio to a Bluetooth headset, so no
+root or vendor API is involved.
+
+```mermaid
+flowchart LR
+  subgraph PA["Phone A: spare Android phone"]
+    AG["HFP audio gateway (AG)"]
+    HLP["Dial helper"]
+    TEL["Telecom + SIM A"]
+  end
+  subgraph HOST["Linux host"]
+    BT["BlueZ + WirePlumber<br/>HF role"]
+    PW["PipeWire<br/>SCO nodes"]
+    AGENT["telephone-agent<br/>backend = pipewire"]
+  end
+  B["Phone B: callee"]
+  AG <-->|"SCO: mSBC 16 kHz or CVSD 8 kHz"| BT
+  BT <--> PW
+  PW <--> AGENT
+  AGENT <-->|"LAN HTTP"| HLP
+  AG <--> TEL
+  TEL -.->|"cellular voice"| B
+```
+
+WirePlumber enables the HF role with the fragment in
+[`config/wireplumber/51-bt-headset.conf`](../config/wireplumber/51-bt-headset.conf). While
+a call is active, PipeWire creates two nodes for the phone's Bluetooth address:
+
+| Direction | Node | Factory | Media class | Agent action |
+|---|---|---|---|---|
+| Callee to agent (downlink) | `bluez_input.<address>.<id>` | `api.bluez5.sco.source` | `Stream/Output/Audio` | Capture with `pw-record` |
+| Agent to callee (uplink) | `bluez_output.<address>.<id>` | `api.bluez5.sco.sink` | `Stream/Input/Audio` | Play with `pw-play` |
+
+The direction is not inverted as it is on the USB gadget: capture from the SCO source is
+the remote party, and playback to the SCO sink is the agent's voice. The `.<id>` suffix is
+a SPA object id and can change per connection, so the agent discovers nodes by
+`api.bluez5.address` and `factory.name`. The nodes exist only during a call or SCO link;
+the backend waits up to `node_timeout_s` for them.
+
+HFP call control is not implemented. The LAN helper remains responsible for dialing and
+hangup, and Phone A must be reachable on the LAN. The Bluetooth path therefore changes the
+audio transport only.
+
+The host must run the agent in the same user session as PipeWire and WirePlumber, normally
+a systemd user service with lingering. The system-level one-shot unit used for the USB path
+does not work unchanged. See [Bluetooth HFP](./bluetooth-hfp.md) and
+[ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
+
+This variant was validated on a Linux laptop with a Samsung Galaxy A23: mSBC at 16 kHz,
+bidirectional audio during a Google Meet call, and both SCO directions confirmed with
+`pw-record` and `pw-play`. A PSTN call over Bluetooth and the Pi Zero 2 W were not tested;
+the Pi is expected to work but is unverified. The cellular codec still caps fidelity.
 
 ## 5. Component view
 
@@ -130,6 +188,10 @@ flowchart LR
 The charger and hub power Phone A over USB-C PD and the Pi over a USB-A port. The
 phone is the USB data host and a power sink; the Pi is the USB device and is
 bus-powered. The hub carries both power and data, so it is a single point of failure.
+
+For the Bluetooth HFP variant, replace the USB audio edge with the SCO link in section
+4.1. The helper, LAN, and cloud paths are unchanged; Phone A can charge from any USB
+charger because its port is no longer the audio link.
 
 ## 6. A scheduled call, end to end
 
@@ -195,6 +257,10 @@ downlink to 16 kHz mono for STT and TTS output to 48 kHz stereo. The 48 kHz rate
 transport format, not a promise of wideband speech; the codec sets the bandwidth. If a
 direction is silent, check USB audio routing and the phone's "Disable USB audio
 routing" setting; verify the selected route on your device.
+
+The Bluetooth HFP variant in section 4.1 does not invert the direction. Its SCO source is
+the downlink and its SCO sink is the uplink, so `pw-record` and `pw-play` map directly to
+capture and playback.
 
 ## 8. Call state machine
 
@@ -264,7 +330,7 @@ unless the UPS covers them, so a call in progress fails. See
 [Power and thermal](./power-and-thermal.md) and verify the UPS-to-hub wiring for the
 chosen hardware.
 
-## 10. Alternatives considered and rejected
+## 10. Alternatives considered
 
 ### Root with Xposed or a custom ROM
 
@@ -289,10 +355,15 @@ regulated and may not be lawful here.
 
 ### Bluetooth HFP
 
-Bluetooth HFP also provides both call directions with SCO/eSCO and optionally mSBC. It
-avoids a cable, but pairing and reconnection are fragile for unattended operation, the
-phone may route to the wrong device, codec negotiation varies, and 2.4 GHz Wi-Fi shares
-spectrum with Bluetooth.
+Bluetooth HFP is a **supported alternative**, not a rejected one. The host acts as the
+hands-free unit (HF) and Phone A as the audio gateway (AG), and PipeWire exposes the
+call as a SCO source and sink. It avoids a USB data cable, does not need USB device mode,
+and the phone can charge from a separate charger. It is not the default because pairing
+and reconnection are additional failure modes for unattended operation, the phone can
+route to the wrong device, SCO nodes exist only while a call is active, the codec varies
+between mSBC and CVSD, the agent must share the PipeWire user session, and 2.4 GHz Wi-Fi
+shares spectrum with Bluetooth. See [Bluetooth HFP](./bluetooth-hfp.md) and
+[ADR 0006](./decisions/0006-use-bluetooth-hfp-audio.md).
 
 ### Acoustic coupling
 
@@ -303,12 +374,15 @@ room noise enters both directions, and speakerphone mode may be required.
 ## 11. Capacity and limits
 
 - **One call at a time per phone and Pi pair, including the Zero 2 W.** One SIM, radio,
-  gadget, and audio loop; concurrency needs more pairs, not threads. Inbound calls collide.
+  audio transport, and audio loop; concurrency needs more pairs, not threads. Inbound calls collide.
 - **The Zero 2 W suits a network-bound pipeline.** Audio and resampling are small next
   to cloud STT, LLM, and TTS. Its 512 MB rules out local models, and journald is
   volatile; the ledger is the small persistent exception.
 - **USB 2.0 is not the limit.** The gadget stream is about 1.5 Mbit/s each way; buffer
   sizing, clock drift, and ALSA underruns (`xrun`) matter more.
+- **Bluetooth HFP is narrower than USB.** mSBC carries 16 kHz and CVSD carries 8 kHz;
+  either is enough for the cellular codec, but Bluetooth adds a shared 2.4 GHz link and
+  SCO retransmission to the latency budget.
 - **The telephony codec caps fidelity.** AMR-NB is 8 kHz, AMR-WB is 16 kHz, EVS adapts.
   The 48 kHz gadget avoids extra resampling but cannot add cellular bandwidth.
 - **Duration and retries are bounded.** A hard maximum call duration, a silence timeout,
@@ -323,7 +397,8 @@ redacted destination. Provider events record TTFT and TTFA without storing audio
 Every call ends with one outcome: `answered_and_completed`, `no_answer`, `busy`,
 `rejected`, `failed_setup`, `failed_audio`, `provider_error`, or `timeout`. The outcome
 goes to the ledger and the daily heartbeat; a missing heartbeat is itself an alert.
-The heartbeat reports helper reachability, gadget enumeration, call duration, and the last outcome.
+The heartbeat reports helper reachability, audio backend availability (USB gadget
+enumeration or Bluetooth SCO nodes), call duration, and the last outcome.
 
 Audio and transcripts are not persisted or logged by default. Debug captures are
 opt-in, time-bounded, and deleted after review. [Runbook](./runbook.md) covers weekly
@@ -344,7 +419,8 @@ Carried from the [design brief](./design-brief.md); not resolved here.
 
 [Design brief](./design-brief.md), [hardware](./hardware.md),
 [power and thermal](./power-and-thermal.md), [Raspberry Pi setup](./raspberry-pi-setup.md),
-[Android setup](./android-setup.md), [dial helper](./dial-helper.md),
-[voice agent](./voice-agent.md), [latency budget](./latency-budget.md),
-[operations](./operations.md), [runbook](./runbook.md), [glossary](./glossary.md), and the
+[Bluetooth HFP](./bluetooth-hfp.md), [Android setup](./android-setup.md),
+[dial helper](./dial-helper.md), [voice agent](./voice-agent.md),
+[latency budget](./latency-budget.md), [operations](./operations.md),
+[runbook](./runbook.md), [glossary](./glossary.md), and the
 [ADRs](./decisions/0001-use-usb-audio-gadget-instead-of-root.md).

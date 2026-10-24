@@ -22,6 +22,11 @@ on the receiving side. Caller ID is the agent SIM's number.
 The repository contains a design document, a hardware build guide, and a reference
 software scaffold. The [design brief](docs/design-brief.md) is the source of truth.
 
+Bluetooth HFP is supported as an alternative audio transport when USB device mode is
+unavailable or inconvenient; USB remains the default and canonical path. See the
+[Bluetooth HFP guide](docs/bluetooth-hfp.md) and
+[ADR 0006](docs/decisions/0006-use-bluetooth-hfp-audio.md).
+
 ## What this is not
 
 - Not an interception or injection tool for a call already in progress on your phone.
@@ -68,6 +73,10 @@ Phone A is a USB data host but a power sink; it does not source VBUS to the gadg
 hub accepts charger power and passes data and power downstream to the phone and the Pi.
 During a power cut, the phone survives on its battery, but the Pi and router do not, so
 the UPS must cover the hub and the router.
+
+The diagram shows the canonical USB path. In the Bluetooth HFP variant, the USB-C audio
+edge is replaced by an SCO link, and Phone A can charge from a separate supply; the
+helper, LAN, and cloud paths are unchanged.
 
 ## How it works
 
@@ -123,6 +132,7 @@ CHANGELOG.md
 Makefile
 .env.example
 config/config.example.toml
+config/wireplumber/51-bt-headset.conf
 docs/
   README.md
   design-brief.md
@@ -131,6 +141,7 @@ docs/
   bom.csv
   power-and-thermal.md
   raspberry-pi-setup.md
+  bluetooth-hfp.md
   android-setup.md
   dial-helper.md
   voice-agent.md
@@ -141,16 +152,21 @@ docs/
   troubleshooting.md
   faq.md
   glossary.md
-  decisions/0001-...md .. 0005-...md
+  decisions/0001-...md .. 0006-...md
 scripts/
   README.md
   uac-gadget.sh
   install.sh
   audio-loopback-test.sh
+  bluetooth-setup.sh
+  bluetooth-check.sh
+  bluetooth-audio-test.sh
   dial.sh
   systemd/uac-gadget.service
   systemd/telephone-agent.service
   systemd/telephone-agent.timer
+  systemd/telephone-agent-bluetooth.service
+  systemd/telephone-agent-bluetooth.timer
 agent/
   pyproject.toml
   README.md

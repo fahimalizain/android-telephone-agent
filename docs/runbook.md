@@ -16,6 +16,11 @@ export PROVIDER_HEALTH_URL="https://$PROVIDER_HOST/health"
 Related: [operations](./operations.md), [troubleshooting](./troubleshooting.md), [Raspberry Pi setup](./raspberry-pi-setup.md), [Android setup](./android-setup.md),
 [hardware](./hardware.md), and the [service unit](../scripts/systemd/telephone-agent.service).
 
+For the Bluetooth HFP alternative, start with [Bluetooth HFP](./bluetooth-hfp.md). The
+audio incident sections below (USB gadget, ALSA, UAC) apply to the USB path; for Bluetooth,
+use `scripts/bluetooth-check.sh <mac>` and `scripts/bluetooth-audio-test.sh list` during
+the call, then inspect the WirePlumber journal.
+
 ## First 5 minutes
 
 1. Confirm the symptom and whether a call is active. End a stuck call before diagnosing anything else.
@@ -71,7 +76,7 @@ sudo journalctl -u telephone-agent.service -n 120 --no-pager | grep -iE 'playbac
 cd "$REPO" && ./scripts/audio-loopback-test.sh
 ```
 
-On the phone, confirm call volume is up, Bluetooth is off, and Disable USB audio routing is OFF.
+On the phone, confirm call volume is up, Bluetooth is off for the USB path, and Disable USB audio routing is OFF.
 
 **Fix.** Reseat the USB-C cable, restart `uac-gadget.service`, and place a supervised test call. Match the playback device in configuration to `aplay -l`. If UAC1 fails, try UAC2. Reboot the phone if its audio route is stuck.
 
@@ -265,5 +270,6 @@ Record the times, slot, error, action, and test result. Update this runbook if a
 
 ## Related documents
 
-[Operations](./operations.md), [troubleshooting](./troubleshooting.md), [hardware](./hardware.md), [Raspberry Pi setup](./raspberry-pi-setup.md), [Android setup](./android-setup.md), and the
+[Operations](./operations.md), [troubleshooting](./troubleshooting.md), [Bluetooth HFP](./bluetooth-hfp.md),
+[hardware](./hardware.md), [Raspberry Pi setup](./raspberry-pi-setup.md), [Android setup](./android-setup.md), and the
 [service unit](../scripts/systemd/telephone-agent.service).

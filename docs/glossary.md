@@ -50,7 +50,8 @@ dial helper so the system is less likely to kill it.
 the speaker and microphone interfaces used here.
 
 **HFP.** Bluetooth Hands-Free Profile, a profile for car kits and headsets that carries
-call control and SCO or eSCO audio.
+call control and SCO or eSCO audio. The phone is the audio gateway (AG); the headset or
+car kit is the hands-free unit (HF).
 
 **host role and device role.** The two USB data roles: the host initiates enumeration
 and transfers, while the device responds. Phone A is host and the Pi is device.
@@ -80,8 +81,8 @@ the hardware accepts. It is used for the fixed-format gadget.
 **PSTN.** Public switched telephone network, the circuit-switched telephone system that
 connects the cellular call to the callee.
 
-**SCO.** Synchronous Connection Oriented, a Bluetooth link used for narrowband call
-audio. eSCO is its enhanced, retransmitting variant.
+**SCO.** Synchronous Connection Oriented, a Bluetooth link used for call audio. It carries
+narrowband CVSD or wideband mSBC; eSCO is its enhanced, retransmitting variant.
 
 **SIM.** Subscriber Identity Module, the chip or profile that identifies a mobile
 subscription. SIM A is the agent's number.

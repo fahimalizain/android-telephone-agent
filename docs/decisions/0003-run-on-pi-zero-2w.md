@@ -85,9 +85,12 @@ the Zero 2 W is sufficient for the cloud-bound pipeline and fits the budget.
 ### Raspberry Pi 5
 
 The Pi 5 is rejected because its USB-C port is power-only and cannot act as a USB
-device. Without device mode there is no UAC gadget and therefore no headset path. A Pi
-5 could run the agent against an external USB gadget board, but that adds hardware and
-complexity for no benefit in this design.
+device. Without device mode there is no UAC gadget and therefore no canonical headset
+path. A Pi 5 could use the Bluetooth HFP alternative in
+[ADR 0006](./0006-use-bluetooth-hfp-audio.md) in principle, but that path is unverified
+on a Pi 5 and does not make it the canonical gadget host. A Pi 5 could run the agent
+against an external USB gadget board, but that adds hardware and complexity for no
+benefit in this design.
 
 ### Raspberry Pi Zero W
 

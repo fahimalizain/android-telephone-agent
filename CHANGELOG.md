@@ -10,7 +10,18 @@ The project is at alpha, design stage; minor versions may change APIs and file l
 
 ### Added
 
-- Nothing yet.
+- Bluetooth HFP alternative to the USB gadget: the Linux host acts as the
+  Hands-Free Profile headset (HF) and Phone A as the audio gateway (AG).
+- `PipeWireAudio` runtime backend using `pw-record`/`pw-play` and SCO node
+  discovery for both call directions; the USB gadget backend remains the
+  default.
+- `audio.backend`, `audio.bluetooth_address`, and `audio.node_timeout_s`
+  configuration, with Bluetooth examples and validation.
+- Bluetooth HFP setup, check, and audio-test scripts plus an ADR and setup guide.
+- systemd user unit and timer examples for the Bluetooth backend; the existing
+  system unit remains for the USB gadget path.
+- Tests for SCO node discovery, Bluetooth configuration validation, and CLI
+  backend wiring.
 
 ## [0.1.0] - 2026-10-24
 

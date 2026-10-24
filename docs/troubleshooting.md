@@ -8,6 +8,10 @@ Related: [Raspberry Pi setup](./raspberry-pi-setup.md), [Android setup](./androi
 [hardware](./hardware.md), [operations](./operations.md), [runbook](./runbook.md), and the
 [service unit](../scripts/systemd/telephone-agent.service).
 
+For the Bluetooth HFP alternative, start with [Bluetooth HFP](./bluetooth-hfp.md). The
+USB enumeration and ALSA sections below apply to the UAC1 gadget; Bluetooth failures are
+diagnosed with `bluetoothctl`, `pw-dump`, and the WirePlumber journal instead.
+
 Work from the bottom of the stack upward: power, USB enumeration, ALSA, Android routing, helper, network,
 agent. A fault at a lower layer produces misleading errors at every layer above it. Change one thing at
 a time and re-test with a loopback or a supervised call after each change.
@@ -68,7 +72,7 @@ find the holder with `fuser` or `lsof` before killing anything.
 
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
-| Call audio comes from the earpiece | Phone did not route to USB, or enumerated after the call | Phone call screen, `cat /proc/asound/cards`, Bluetooth state | Connect the gadget before dialing, disable Bluetooth, confirm USB audio routing is enabled, reboot the phone |
+| Call audio comes from the earpiece | Phone did not route to USB, or enumerated after the call | Phone call screen, `cat /proc/asound/cards`, Bluetooth state | Connect the gadget before dialing, disable Bluetooth for the USB path, confirm USB audio routing is enabled, reboot the phone |
 | Samsung SIM picker appears | Helper did not pass the phone account handle, or no default SIM | SIM manager, helper logs, `/health` SIM label | Set the default calling SIM and pass `EXTRA_PHONE_ACCOUNT_HANDLE` |
 | Helper notification is missing | Android 13+ notification permission denied | Settings > Apps > helper > Notifications | Grant notification permission; the foreground service needs a visible notification |
 | Helper is killed after hours | Battery optimization or One UI sleeping apps | Settings > Battery > Background usage limits | Set Unrestricted, remove from sleeping lists, lock in recents |
@@ -190,5 +194,5 @@ and `adb` is unavailable over the gadget cable.
 ## Related documents
 
 [Operations](./operations.md), [runbook](./runbook.md), [Raspberry Pi setup](./raspberry-pi-setup.md),
-[Android setup](./android-setup.md), [hardware](./hardware.md), and the
+[Android setup](./android-setup.md), [Bluetooth HFP](./bluetooth-hfp.md), [hardware](./hardware.md), and the
 [service unit](../scripts/systemd/telephone-agent.service).

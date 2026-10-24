@@ -89,13 +89,13 @@ sometimes local-only, and absent on most recent devices. `/dev/diag` and vendor
 diagnostic protocols can capture modem traffic on some rooted devices, but they are
 taps, not audio injection points. Both were rejected as unportable and firmware-bound.
 
-### Bluetooth HFP or acoustic coupling
+### Bluetooth HFP and acoustic coupling
 
 Bluetooth HFP provides both directions without a cable, but pairing, reconnection,
-codec negotiation, and 2.4 GHz coexistence make it less deterministic. Acoustic
-coupling avoids USB entirely but is sensitive to levels, echo, and room noise. Both
-are documented as rejected alternatives in the architecture; neither is as repeatable
-as a wired UAC gadget.
+codec negotiation, and 2.4 GHz coexistence make it less deterministic. It was rejected
+here as the default for that reason, but it is now supported as an opt-in alternative;
+see [ADR 0006](./0006-use-bluetooth-hfp-audio.md). Acoustic coupling avoids USB entirely
+but is sensitive to levels, echo, and room noise, and remains rejected.
 
 ## References
 

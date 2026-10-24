@@ -14,14 +14,28 @@
 phone_number = "+15555550100"
 
 [audio]
-# ALSA card id of the USB gadget, not the bracketed description. `arecord -l`
-# prints a line such as:
+# Transport: "alsa" is the USB Audio Class gadget (default); "pipewire" is a
+# Bluetooth HFP headset link. The USB path needs card/device. The Bluetooth path
+# needs bluetooth_address and a host running PipeWire/WirePlumber. See
+# docs/bluetooth-hfp.md.
+backend = "alsa"
+
+# USB gadget settings (backend = "alsa"). This is the ALSA card id, not the
+# bracketed description. `arecord -l` prints a line such as:
 #   card 0: UAC1Gadget [USB Audio], device 0: USB Audio [USB Audio]
 # In that example the card id is "UAC1Gadget". Verify the value on your device.
 card = "UAC1Gadget"
 device = 0
-# The gadget itself runs at 48 kHz stereo. ALSA's plughw plugin resamples and
-# downmixes to this processing format, which is enough for the cellular codec.
+
+# Bluetooth HFP settings (backend = "pipewire"). Set the phone's Bluetooth
+# address, for example "AA:BB:CC:DD:EE:FF". The SCO audio nodes exist only while
+# a call is active, so the runtime waits up to node_timeout_s for them.
+bluetooth_address = ""
+node_timeout_s = 30.0
+
+# The gadget itself runs at 48 kHz stereo and the Bluetooth SCO link is 8 kHz
+# (CVSD) or 16 kHz (mSBC). The ALSA/PipeWire layers resample and downmix to this
+# processing format, which is enough for the cellular codec.
 sample_rate = 16000
 channels = 1
 frame_ms = 20

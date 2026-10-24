@@ -7,7 +7,7 @@ only the Python standard library; pytest and ruff are development dependencies.
 
 from __future__ import annotations
 
-from .audio import AudioError, AudioStats, CaptureDevice, GadgetAudio
+from .audio import AudioDevice, AudioError, AudioStats, CaptureDevice, GadgetAudio, PipeWireAudio
 from .brain import (
     DEFAULT_SYSTEM_PROMPT,
     Brain,
@@ -44,6 +44,7 @@ __all__ = [
     "DEFAULT_SYSTEM_PROMPT",
     "AgentConfig",
     "AudioConfig",
+    "AudioDevice",
     "AudioError",
     "AudioStats",
     "Brain",
@@ -63,6 +64,7 @@ __all__ = [
     "Endpointer",
     "GadgetAudio",
     "HttpBrain",
+    "PipeWireAudio",
     "Synthesizer",
     "Transcriber",
     "__version__",

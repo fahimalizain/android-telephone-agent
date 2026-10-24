@@ -14,7 +14,8 @@ USB or Android specification enforces them.
   then [hardware](hardware.md).
 - Building the device: [hardware](hardware.md), [power and thermal](power-and-thermal.md),
   [Raspberry Pi setup](raspberry-pi-setup.md), [Android setup](android-setup.md), then
-  [dial helper](dial-helper.md).
+  [dial helper](dial-helper.md). For the Bluetooth alternative, read
+  [Bluetooth HFP](bluetooth-hfp.md) after the Android setup.
 - Running the agent: [voice agent](voice-agent.md), [operations](operations.md),
   [runbook](runbook.md), then [troubleshooting](troubleshooting.md).
 - Reference: [latency budget](latency-budget.md), [prompts](prompts.md), [FAQ](faq.md),
@@ -30,6 +31,7 @@ USB or Android specification enforces them.
 | [Bill of materials](bom.csv) | Machine-readable BOM with quantities, notes, and indicative INR prices. |
 | [Power and thermal](power-and-thermal.md) | Power topology, UPS coverage, phone battery care, and thermal limits. |
 | [Raspberry Pi setup](raspberry-pi-setup.md) | OS image, boot configuration, USB gadget setup, and service installation. |
+| [Bluetooth HFP](bluetooth-hfp.md) | Alternative audio transport: WirePlumber roles, pairing, SCO nodes, audio test, agent configuration, and user-session deployment. |
 | [Android setup](android-setup.md) | Phone A configuration for unattended calls, SIM selection, and USB audio routing. |
 | [Dial helper](dial-helper.md) | Reference helper app, its LAN API, bearer-token authentication, and call-control limits. |
 | [Voice agent](voice-agent.md) | Capture, voice activity detection, STT, LLM, TTS, playback, barge-in, and timeouts. |
@@ -45,6 +47,7 @@ USB or Android specification enforces them.
 | [ADR-0003: Pi Zero 2 W](decisions/0003-run-on-pi-zero-2w.md) | Use the Raspberry Pi Zero 2 W as the reference runtime. |
 | [ADR-0004: Cloud voice stack](decisions/0004-cloud-voice-stack-first.md) | Use cloud STT, LLM, and TTS providers before local speech models. |
 | [ADR-0005: Real SIM origination](decisions/0005-originate-from-real-sim.md) | Originate calls from a real SIM rather than a VoIP service. |
+| [ADR-0006: Bluetooth HFP audio](decisions/0006-use-bluetooth-hfp-audio.md) | Support Bluetooth HFP as an alternative audio transport while keeping USB as the default. |
 
 ## Related documents
 

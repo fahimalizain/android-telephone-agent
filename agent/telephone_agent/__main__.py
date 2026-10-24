@@ -11,14 +11,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from . import __version__
-from .audio import AudioError, GadgetAudio
+from .audio import AudioDevice, AudioError, GadgetAudio, PipeWireAudio
 from .brain import BrainError, build_brain
-from .config import Config, ConfigError, ensure_e164, load
+from .config import Config, ConfigError, DialerConfig, ensure_e164, load
 from .dialer import Dialer, DialerError, mask_number
 from .pipeline import CallEndReason, CallSession, CallState
 
@@ -34,8 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="telephone-agent",
         description=(
             "Reference runtime for an outbound telephone voice agent. "
-            "The agent runs on a Raspberry Pi and reaches Phone A through a "
-            "LAN helper app."
+            "The agent runs on a small Linux host and reaches Phone A through a "
+            "USB audio gadget or a Bluetooth HFP headset link, plus a LAN helper app."
         ),
         epilog=(
             "examples:\n"
@@ -66,10 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser(
         "doctor",
-        help="check configuration, capture devices, and the dial helper",
+        help="check configuration, the audio path, and the dial helper",
         description=(
-            "Load the configuration, list ALSA capture devices, verify that the "
-            "configured card exists, and call the helper's health endpoint."
+            "Load the configuration, check the selected audio transport (ALSA "
+            "gadget or PipeWire Bluetooth HFP), and call the helper's health endpoint."
         ),
     )
     doctor.set_defaults(handler=_cmd_doctor)
@@ -106,11 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     selftest = subparsers.add_parser(
         "selftest",
-        help="record two seconds from the gadget and report RMS",
+        help="record two seconds from the call downlink and report RMS",
         description=(
-            "Record two seconds from the configured gadget card and print frame "
+            "Record two seconds from the configured call downlink and print frame "
             "count, duration, RMS, dBFS, and peak amplitude. This check does not "
-            "place a call."
+            "place a call. With the Bluetooth backend, the SCO link exists only "
+            "during a call, so place a call first."
         ),
     )
     selftest.set_defaults(handler=_cmd_selftest)
@@ -150,11 +152,47 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     failed = False
 
     print(f"config: {Path(args.config)}")
-    print(f"audio: {config.audio.card} ({_alsa_device(config)})")
+    print(f"audio backend: {config.audio.backend}")
     print(
         f"format: {config.audio.sample_rate} Hz, {config.audio.channels} channel(s), "
         f"{config.audio.frame_ms} ms frames"
     )
+    if config.audio.backend == "alsa":
+        print(f"audio: {config.audio.card} ({_alsa_device(config)})")
+        if not _check_alsa_capture(config.audio.card):
+            failed = True
+    else:
+        print(
+            f"audio: Bluetooth HFP {config.audio.bluetooth_address} (PipeWire SCO), "
+            f"node timeout {config.audio.node_timeout_s:g} s"
+        )
+        if not _check_pipewire_tools():
+            failed = True
+        try:
+            capture, playback = PipeWireAudio.find_sco_nodes(
+                config.audio.bluetooth_address,
+                pw_dump="pw-dump",
+            )
+        except AudioError as exc:
+            print(f"audio: FAIL: {exc}", file=sys.stderr)
+            failed = True
+        else:
+            if capture is not None and playback is not None:
+                print(f"  downlink: {capture}")
+                print(f"  uplink:   {playback}")
+            elif capture is None and playback is None:
+                print(
+                    "  SCO nodes: not present (idle; place a call to test the Bluetooth audio path)"
+                )
+            else:
+                downlink = "present" if capture is not None else "missing"
+                uplink = "present" if playback is not None else "missing"
+                print(
+                    f"  SCO nodes: incomplete (downlink={downlink}, uplink={uplink}); "
+                    "a call may be starting or the HFP link may be unhealthy"
+                )
+                failed = True
+
     if config.phone_number:
         print(f"phone: {mask_number(config.phone_number)}")
     else:
@@ -164,26 +202,6 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     if config.brain.kind == "http":
         print(f"  base_url: {config.brain.base_url}")
         print(f"  model: {config.brain.model}")
-
-    print("capture devices:")
-    try:
-        devices = GadgetAudio.list_cards()
-    except AudioError as exc:
-        print(f"  FAIL: {exc}")
-        failed = True
-    else:
-        if not devices:
-            print("  none reported by `arecord -l`")
-            failed = True
-        else:
-            for device in devices:
-                print(f"  {device}")
-            if not any(device.card_id == config.audio.card for device in devices):
-                print(
-                    f"  FAIL: configured card {config.audio.card!r} is not in `arecord -l`",
-                    file=sys.stderr,
-                )
-                failed = True
 
     try:
         health = _dialer_from_config(config.dialer).health()
@@ -201,6 +219,43 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
     print(f"doctor: {'FAIL' if failed else 'ok'}")
     return 1 if failed else 0
+
+
+def _check_alsa_capture(card: str) -> bool:
+    """List ALSA capture devices and verify that *card* is present."""
+
+    print("capture devices:")
+    try:
+        devices = GadgetAudio.list_cards()
+    except AudioError as exc:
+        print(f"  FAIL: {exc}")
+        return False
+    if not devices:
+        print("  none reported by `arecord -l`")
+        return False
+    for device in devices:
+        print(f"  {device}")
+    if not any(device.card_id == card for device in devices):
+        print(
+            f"  FAIL: configured card {card!r} is not in `arecord -l`",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _check_pipewire_tools() -> bool:
+    """Verify that the PipeWire command-line tools used by the backend exist."""
+
+    missing = [tool for tool in ("pw-record", "pw-play", "pw-dump") if shutil.which(tool) is None]
+    if missing:
+        print(
+            f"audio tools: FAIL: missing {', '.join(missing)}; install the pipewire-bin package",
+            file=sys.stderr,
+        )
+        return False
+    print("audio tools: ok (pw-record, pw-play, pw-dump)")
+    return True
 
 
 def _cmd_dial(args: argparse.Namespace) -> int:
@@ -234,18 +289,31 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_selftest(args: argparse.Namespace) -> int:
     config = load(Path(args.config))
     audio = _audio_from_config(config)
-    print(f"recording 2.0 s from {audio.alsa_device} ...")
+    print(f"recording 2.0 s from {audio.description} ...")
+    if config.audio.backend == "pipewire":
+        print(
+            "note: Bluetooth HFP SCO nodes exist only during a call; "
+            f"waiting up to {config.audio.node_timeout_s:g} s for the link"
+        )
     stats = audio.selftest()
     print(f"frames: {stats.frames}")
     print(f"duration: {stats.duration_s:.2f} s")
     print(f"rms: {stats.rms:.1f} ({stats.dbfs:.1f} dBFS)")
     print(f"peak: {stats.peak}")
     if stats.rms == 0:
-        print(
-            "warning: captured digital silence; check the USB gadget and the "
-            "phone's USB audio routing",
-            file=sys.stderr,
-        )
+        if config.audio.backend == "pipewire":
+            print(
+                "warning: captured digital silence; check that a call is active, "
+                "the phone is routing call audio to Bluetooth, and the SCO link "
+                "is up (`scripts/bluetooth-check.sh <mac>`)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "warning: captured digital silence; check the USB gadget and the "
+                "phone's USB audio routing",
+                file=sys.stderr,
+            )
         return 1
     return 0
 
@@ -277,9 +345,17 @@ def _build_session(config: Config, number: str) -> CallSession:
     )
 
 
-def _audio_from_config(config: Config) -> GadgetAudio:
+def _audio_from_config(config: Config) -> AudioDevice:
     """Build the audio device from configuration."""
 
+    if config.audio.backend == "pipewire":
+        return PipeWireAudio(
+            bluetooth_address=config.audio.bluetooth_address,
+            sample_rate=config.audio.sample_rate,
+            channels=config.audio.channels,
+            frame_ms=config.audio.frame_ms,
+            node_timeout_s=config.audio.node_timeout_s,
+        )
     return GadgetAudio(
         card=config.audio.card,
         device=config.audio.device,
@@ -289,14 +365,14 @@ def _audio_from_config(config: Config) -> GadgetAudio:
     )
 
 
-def _dialer_from_config(config: Config) -> Dialer:
-    """Build the dial helper client from configuration."""
+def _dialer_from_config(config: DialerConfig) -> Dialer:
+    """Build the dial helper client from the ``[dialer]`` section."""
 
     return Dialer(
-        url=config.dialer.url,
-        token=config.dialer.token,
-        timeout_s=config.dialer.timeout_s,
-        retries=config.dialer.retries,
+        url=config.url,
+        token=config.token,
+        timeout_s=config.timeout_s,
+        retries=config.retries,
     )
 
 
