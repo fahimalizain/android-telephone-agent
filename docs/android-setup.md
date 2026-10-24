@@ -181,12 +181,40 @@ Notes:
 
 ## Install the helper
 
-Build a signed APK as described in `android-helper/README.md`, then install it over the
-wireless debugging connection:
+`android-helper/` is a complete Android Gradle project, not a set of files to copy into a
+new project. Build it with JDK 21 and Android SDK platform 36. The project uses
+`compileSdk 36`, `targetSdk 36`, `minSdk 30`, and build tools 36.1.0; platform 35 is not
+needed. On this machine:
 
 ```sh
-adb install -r dial-helper.apk
+cd android-helper
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+export ANDROID_HOME=/data/Android
+export GRADLE_USER_HOME=/scratch/gradle
+./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The debug APK is suitable for provisioning and testing. For an unattended deployment,
+build and install a signed release APK instead; see `android-helper/README.md` for the
+signing setup and the release output path.
+
+The repository also includes host-side wrappers: `scripts/build-helper.sh` builds and
+verifies the APKs, and `scripts/install-helper.sh` installs the newest one, grants the
+permissions below, whitelists the package, starts the service, and can probe `/health`.
+
+The bearer token is injected at build time from the `dialHelperToken` Gradle property in
+`$GRADLE_USER_HOME/gradle.properties` (on this machine
+`/scratch/gradle/gradle.properties`; conventionally `~/.gradle/gradle.properties`), never
+from a file in the repository. Put the same token in the Pi's `[dialer] token` or
+`TELEPHONE_AGENT_DIALER__TOKEN`. If the property is absent, the APK still builds with a
+placeholder and `/call` and `/hangup` return `503`. A generated token already exists at
+`/scratch/android/dial-helper/token`; never print or commit its value.
+
+On a dual-SIM phone, also set the `dialHelperSimLabel` Gradle property to the agent SIM's
+account label and rebuild. A blank label is correct on single SIM; on dual SIM it makes
+`/call` return `503 no SIM available` rather than showing a SIM picker. Read the available
+labels from `GET /health` before setting it.
 
 The reference package is `dev.example.dialhelper`. Replace it with your package name in
 all commands. Grant the runtime permissions:
@@ -194,13 +222,17 @@ all commands. Grant the runtime permissions:
 ```sh
 adb shell pm grant dev.example.dialhelper android.permission.CALL_PHONE
 adb shell pm grant dev.example.dialhelper android.permission.READ_PHONE_STATE
+adb shell pm grant dev.example.dialhelper android.permission.READ_PHONE_NUMBERS
 adb shell pm grant dev.example.dialhelper android.permission.ANSWER_PHONE_CALLS
 adb shell pm grant dev.example.dialhelper android.permission.POST_NOTIFICATIONS
 ```
 
-`READ_PHONE_STATE` is needed to enumerate phone accounts and read the SIM label;
-`ANSWER_PHONE_CALLS` is only for best-effort hangup. Neither grants call audio or call
-recording. See `docs/dial-helper.md` for the full permission rationale.
+`POST_NOTIFICATIONS` exists only on Android 13 and newer; skip that command on older
+builds. `READ_PHONE_STATE` is needed to enumerate phone accounts; Android 14 and newer
+gate `TelecomManager.getPhoneAccount()` behind `READ_PHONE_NUMBERS`, which is needed to
+read the SIM/account label. `ANSWER_PHONE_CALLS` is only for best-effort hangup. None of
+these permissions grants call audio or call recording. See `docs/dial-helper.md` for the
+full permission rationale.
 
 Grant the battery exemption. The first command adds the package to the device-idle
 whitelist; the second opens the system confirmation dialog for the same setting:
@@ -221,18 +253,42 @@ adb shell dumpsys deviceidle whitelist | grep dialhelper
 On Samsung, also set Settings → Apps → Dial helper → Battery → Unrestricted. The adb
 whitelist and the Samsung UI are separate controls; apply both.
 
-Start the service and check it from the computer:
+The launcher activity is an alternative to the `pm grant` commands: it requests the
+runtime permissions above and starts the service in one step:
+
+```sh
+adb shell am start -n dev.example.dialhelper/.MainActivity
+```
+
+`MainActivity` requests the runtime permissions above and starts `DialService`. It shows
+the package name, listening port, and start status, with a **Start helper** button to
+retry; it never displays the token. You can also tap the **Dial Helper** app icon on the
+phone.
+
+For headless provisioning, use the `pm grant` commands above and start the exported
+service directly instead:
 
 ```sh
 adb shell am start-foreground-service -n dev.example.dialhelper/.DialService
+```
+
+Then check it from the computer:
+
+```sh
 curl -sS http://192.168.1.50:8765/health
 # {"status":"ok","device":"SM-A235F","sim":"Jio"}
 ```
 
-The reference manifest exports the service so adb can start it; for hardening, set
-`android:exported="false"` and use a launcher activity. If the shell cannot start a
-background foreground service, the same activity is the fallback. The `sim` value shows
-the selected account label, or all available labels when none is configured.
+The manifest exports the service so adb can start it; for hardening, set
+`android:exported="false"` and rely on the launcher activity. If the shell cannot start a
+background foreground service, the activity is the fallback. The `sim` value shows the
+selected account label, or all available labels when none is configured.
+
+The manifest also registers `BootReceiver` for `BOOT_COMPLETED`, so the service tries to
+start after a reboot. This is best effort: Android may reject a foreground-service start
+from the boot context, and vendor battery management can stop it later. Verify after a
+reboot; if the service is not listening, open the launcher activity or start it with adb.
+Do not treat the boot path as reliable on this build until you have tested it.
 
 ## Verify audio routing during a call
 
