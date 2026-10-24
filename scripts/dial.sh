@@ -10,7 +10,7 @@
 set -euo pipefail
 
 readonly DEFAULT_TIMEOUT=30
-readonly E164_REGEX='^\+[1-9][0-9]{7,14}$'
+readonly E164_REGEX='^\+[1-9][0-9]{6,14}$'
 
 URL=""
 TOKEN=""
@@ -31,8 +31,8 @@ Environment:
                                 [dialer] token. Environment values win.
                                 The __URL and __TOKEN spellings are also read.
 
-The number must be E.164: a plus sign, a non-zero country digit, and 7 to 14
-more digits (8 to 15 digits total).
+The number must be E.164: a plus sign, a non-zero country digit, and 6 to 14
+more digits (7 to 15 digits total).
 
 Exit status is non-zero for invalid input, configuration errors, transport
 errors, and non-2xx HTTP responses. The response body is printed when present.
