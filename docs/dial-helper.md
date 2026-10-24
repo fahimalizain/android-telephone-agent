@@ -1,7 +1,8 @@
 # Dial Helper
 
-Status: reference design, not production-hardened. Applies to the Samsung Galaxy A23
-4G (SM-A235F), One UI, Android 13-15.
+Status: reference implementation, not production-hardened. Buildable APK with Android 36
+emulator smoke tests; physical-phone and USB-audio validation pending. Applies to the
+Samsung Galaxy A23 4G (SM-A235F), One UI, Android 13-15.
 
 ## Purpose
 
@@ -35,7 +36,8 @@ unauthenticated for liveness probes; require the token if the label is sensitive
 
 ### `POST /call`
 
-Requires `Authorization: Bearer <token>` and an E.164 number.
+Requires `Authorization: Bearer <token>` and an E.164 number matching
+`^\+[1-9][0-9]{6,14}$` (ASCII digits, 7 to 15 digits total).
 
 ```http
 POST /call HTTP/1.1
@@ -62,9 +64,11 @@ HTTP/1.1 202 Accepted
 {"state":"hangup-requested"}
 ```
 
-Requires the bearer token and no body. `409 {"error":"no active call"}` means no call
-was placed in the active window; `202 {"state":"hangup-unavailable"}` means the platform
-refused to end the call.
+Requires the bearer token and no body. `409 {"error":"no active call"}` means the helper
+has no record of a placed call (it restarted, the window was reset, or no call was placed);
+`202 {"state":"hangup-unavailable"}` means the platform refused to end the call. A
+successful `202 hangup-requested` is repeated for a 60-second grace period so a client
+that lost the first response can retry safely.
 
 ### Error model
 
@@ -72,8 +76,9 @@ refused to end the call.
 |---|---|---|
 | 400 | `{"error":"invalid number"}` | Missing/invalid JSON, or not E.164 |
 | 401 | `{"error":"unauthorized"}` | Missing, malformed, or wrong token |
+| 403 | `{"error":"call permission denied"}` | `CALL_PHONE` is not granted |
 | 409 | `{"error":"call already active"}` | Call placed inside the active window |
-| 409 | `{"error":"no active call"}` | `/hangup` with nothing active |
+| 409 | `{"error":"no active call"}` | `/hangup` with no recorded call |
 | 503 | `{"error":"no SIM available"}` | No account, or no label match |
 | 503 | `{"error":"token not configured"}` | Placeholder token left in the build |
 
@@ -84,15 +89,16 @@ refused to end the call.
 - Compare with `MessageDigest.isEqual`; token length is not treated as secret.
 - Never log the token, the body, or the destination number.
 - The token is compiled into the APK and is extractable. Treat the APK as a secret.
-- Rotation is manual with no overlap window: change the constant, rebuild, reinstall,
-  update the Pi, restart the service.
+- Rotation is manual with no overlap window: change `dialHelperToken` in the Gradle user
+  home, rebuild, reinstall, update the Pi, and restart the service.
 
 ## Android permissions
 
 | Permission | Protection | Why |
 |---|---|---|
 | `CALL_PHONE` | Dangerous, runtime | `TelecomManager.placeCall()` |
-| `READ_PHONE_STATE` | Dangerous, runtime | Enumerate accounts and read labels |
+| `READ_PHONE_STATE` | Dangerous, runtime | Enumerate call-capable accounts |
+| `READ_PHONE_NUMBERS` | Dangerous, runtime | Read account labels through `getPhoneAccount()` on Android 14+ |
 | `ANSWER_PHONE_CALLS` | Dangerous, runtime | Best-effort `endCall()` |
 | `INTERNET` | Normal | Opens the LAN listening socket |
 | `FOREGROUND_SERVICE` | Normal | Keeps the socket alive |
@@ -101,11 +107,13 @@ refused to end the call.
 | `RECEIVE_BOOT_COMPLETED` | Normal, optional | Start the service after reboot |
 | `WAKE_LOCK` | Normal, optional | Only if a partial wake lock is added |
 
-`READ_PHONE_STATE` is required by `getCallCapablePhoneAccounts()` and
-`getPhoneAccount()` unless the app is the default dialer. It is not used for call audio
-and does not grant call recording or call-log access. Do not make the helper the default
-dialer; that changes the phone's call UI and is unnecessary for dialing. Grant the
-runtime permissions during provisioning as shown in `docs/android-setup.md`.
+`READ_PHONE_STATE` is required by `getCallCapablePhoneAccounts()` unless the app is the
+default dialer. Android 14 and newer additionally require `READ_PHONE_NUMBERS` for
+`getPhoneAccount()`, which the helper uses to read the account label for SIM selection.
+Neither permission is used for call audio, and neither grants call recording or call-log
+access. Do not make the helper the default dialer; that changes the phone's call UI and
+is unnecessary for dialing. Grant the runtime permissions during provisioning as shown
+in `docs/android-setup.md`.
 
 ## Foreground service
 
@@ -156,8 +164,12 @@ by One UI version, locale, and carrier branding; verify on your device.
 `false` when it did not end anything, and some builds refuse it for non-dialer apps.
 
 The helper treats hangup as best effort: `202 hangup-requested` means `endCall()`
-returned `true`; `202 hangup-unavailable` means the platform refused; `409` means no
-call was placed in the active window. Do not read `202` as proof the call ended. The
+returned `true`; `202 hangup-unavailable` means the platform refused; `409` means the
+helper has no record of a placed call. Do not read `202` as proof the call ended. The
+call window is cleared only after `endCall()` returns `true`; on a refusal or exception
+it stays in place, so a following `/call` returns `409` instead of overlapping a call
+that may still be active. The ten-minute `CALL_WINDOW_MS` gates new `/call` requests,
+not `/hangup`, so a call that lasts longer than ten minutes can still be ended. The
 fallback is for the agent to finish and the remote party to hang up, with a hard maximum
 duration enforced by the Pi; the cellular leg may stay up and billed until then.
 
@@ -167,9 +179,12 @@ duration enforced by the Pi; the cellular leg may stay up and billed until then.
   with a null intent.
 - The optional `BootReceiver` starts it after `BOOT_COMPLETED`, but Android may reject a
   background foreground-service start; verify on your device.
-- Retry only connection failures and timeouts, at most twice with backoff. Do not retry a
-  `202`; the active-call timestamp is not idempotent across a restart. One scheduled call
-  per slot is enforced on the Pi.
+- Retry only connection failures and timeouts, at most twice with backoff. The helper
+  does not implement `Idempotency-Key`, so a `/call` retry after a lost response can
+  return `409` (or place a duplicate after a service restart). Do not retry `/call`
+  blindly; use one stable key per call once the helper supports deduplication. Do not
+  retry a `202`; the active-call timestamp is not idempotent across a restart. One
+  scheduled call per slot is enforced on the Pi.
 - Log through logcat tag `DialHelper`: start/stop, listen address, account label, outcome,
   failures. Never log numbers, bodies, or tokens.
 - Do not hold a coroutine open for the call; placing a call is a short IPC and the active
