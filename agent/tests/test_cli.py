@@ -722,7 +722,11 @@ def test_build_session_factory_records_transcripts_and_forwards_events(
         "call_end",
     ]
     assert records[0]["call_id"] == "call-1234567890"
-    assert records[0]["number"] == "*******0100"
+    assert records[0]["number"] == "+15555550100"
+    assert records[0]["objective"] == "Confirm the appointment."
+    assert records[0]["audio_backend"] == "alsa"
+    assert records[0]["realtime_kind"] == "off"
+    assert "realtime_model" not in records[0]
     assert records[1]["text"] == "Hello?"
     assert records[2]["text"] == "Hi, this is the agent."
     assert records[3]["reason"] == "completed"
@@ -745,6 +749,11 @@ card = "UAC1Gadget"
 [dialer]
 url = "http://127.0.0.1:8765"
 token = "test-token"
+
+[realtime]
+kind = "grok"
+model = "grok-voice-3.0"
+voice = "ara"
 
 [transcript]
 enabled = true
@@ -790,9 +799,16 @@ directory = "{directory}"
         "reply",
         "call_end",
     ]
-    assert records[0]["number"] == "*******0100"
-    output = capsys.readouterr().out
-    assert "call ended: state=idle reason=completed turns=1 duration=4.5s" in output
+    assert records[0]["number"] == "+15555550100"
+    assert records[0]["audio_backend"] == "alsa"
+    assert records[0]["realtime_kind"] == "grok"
+    assert records[0]["realtime_model"] == "grok-voice-3.0"
+    assert records[0]["realtime_voice"] == "ara"
+    assert "objective" not in records[0]
+    captured = capsys.readouterr()
+    assert "call ended: state=idle reason=completed turns=1 duration=4.5s" in captured.out
+    assert "running one call to *******0100" in captured.out
+    assert "+15555550100" not in captured.out + captured.err
 
 
 def test_doctor_realtime_reports_missing_key(

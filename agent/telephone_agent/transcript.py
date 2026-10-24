@@ -2,8 +2,13 @@
 
 Each call gets its own JSONL file under the configured directory. A line is
 written for start, each callee utterance, each agent reply, and the final
-result. Audio is never written. Phone numbers are always masked with
-:func:`~telephone_agent.dialer.mask_number` before they reach a file.
+result. Audio is never written.
+
+The local transcript is intentionally complete: it contains the full E.164
+destination number, call metadata, and verbatim conversation text. It is not
+redacted. Operational logs remain masked. Treat every transcript file as
+sensitive personal data: it is created with mode 0600 inside a directory with
+mode 0700 and must not be shipped off the device.
 
 The writer is intentionally best-effort: a full disk, a permissions problem, or
 a closed file must not abort a live call. On the first I/O error the logger logs
@@ -23,7 +28,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .dialer import mask_number
 from .pipeline import AgentReply, CallFinished, SessionEvent, Utterance
 
 __all__ = ["TranscriptLogger"]
@@ -78,6 +82,10 @@ def _timestamp(now: datetime) -> str:
 
 class TranscriptLogger:
     """Write one call's events to an append-only JSONL file.
+
+    The file is a complete local record, not a redacted log: it keeps the full
+    destination number, call metadata, and verbatim conversation text. Keep it
+    local, readable only by the service user.
 
     Args:
         directory: Directory for transcript files. Created with mode 0700 if it
@@ -141,10 +149,37 @@ class TranscriptLogger:
         self._fd = fd
         self.path = path
 
-    def call_start(self, *, direction: str, number: str) -> None:
-        """Record the start of a call with a masked destination."""
+    def call_start(
+        self,
+        *,
+        direction: str,
+        number: str,
+        objective: str = "",
+        audio_backend: str = "",
+        realtime_kind: str = "",
+        realtime_model: str = "",
+        realtime_voice: str = "",
+    ) -> None:
+        """Record the start of a call with the full destination and metadata.
 
-        self.log_event("call_start", direction=direction, number=mask_number(number))
+        This is the local transcript, so *number* is stored exactly as supplied
+        rather than masked. The objective is included only when non-empty.
+        ``realtime_model`` and ``realtime_voice`` are included for a Grok
+        realtime call.
+        """
+
+        fields: dict[str, Any] = {
+            "direction": direction,
+            "number": number,
+            "audio_backend": audio_backend,
+            "realtime_kind": realtime_kind,
+        }
+        if objective:
+            fields["objective"] = objective
+        if realtime_kind == "grok":
+            fields["realtime_model"] = realtime_model
+            fields["realtime_voice"] = realtime_voice
+        self.log_event("call_start", **fields)
 
     def transcript(self, text: str, *, role: str = "callee") -> None:
         """Record one callee utterance."""

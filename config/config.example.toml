@@ -168,4 +168,7 @@ enabled = true
 # One file per call, named YYYYmmddTHHMMSS-<short-id>.jsonl. The directory is
 # created with mode 0700 and each file with mode 0600. A relative path is
 # resolved against the process working directory. runtime/ is gitignored.
+# These files are not redacted: they contain the full phone number, full
+# conversation text, and call metadata. Operational logs remain masked. Keep
+# them on-device and apply a retention or deletion policy.
 directory = "runtime/transcripts"

@@ -43,7 +43,15 @@ def test_writes_start_transcript_reply_and_end(tmp_path: Path) -> None:
         clock=lambda: FIXED_NOW,
     )
 
-    logger.call_start(direction="outbound", number="+15555550100")
+    logger.call_start(
+        direction="outbound",
+        number="+15555550100",
+        objective="Confirm the appointment.",
+        audio_backend="pipewire",
+        realtime_kind="grok",
+        realtime_model="grok-voice-3.0",
+        realtime_voice="ara",
+    )
     logger.transcript("Hello, who is this?")
     logger.reply("This is the telephone agent.")
     logger.call_end(
@@ -63,7 +71,12 @@ def test_writes_start_transcript_reply_and_end(tmp_path: Path) -> None:
             "call_id": CALL_ID,
             "event": "call_start",
             "direction": "outbound",
-            "number": "*******0100",
+            "number": "+15555550100",
+            "audio_backend": "pipewire",
+            "realtime_kind": "grok",
+            "objective": "Confirm the appointment.",
+            "realtime_model": "grok-voice-3.0",
+            "realtime_voice": "ara",
         },
         {
             "ts": "2026-10-24T09:15:02.123+05:30",
@@ -91,7 +104,7 @@ def test_writes_start_transcript_reply_and_end(tmp_path: Path) -> None:
     ]
 
 
-def test_masks_the_number_and_never_writes_e164_digits(tmp_path: Path) -> None:
+def test_stores_the_full_number_without_masking(tmp_path: Path) -> None:
     logger = TranscriptLogger(tmp_path, call_id=CALL_ID, clock=lambda: FIXED_NOW)
 
     logger.call_start(direction="outbound", number="+15555550100")
@@ -99,8 +112,52 @@ def test_masks_the_number_and_never_writes_e164_digits(tmp_path: Path) -> None:
 
     assert logger.path is not None
     text = logger.path.read_text(encoding="utf-8")
-    assert "+15555550100" not in text
-    assert "*******0100" in text
+    assert "+15555550100" in text
+    assert "*******0100" not in text
+
+
+def test_call_start_omits_empty_objective_and_non_realtime_metadata(tmp_path: Path) -> None:
+    logger = TranscriptLogger(tmp_path, call_id=CALL_ID, clock=lambda: FIXED_NOW)
+
+    logger.call_start(
+        direction="outbound",
+        number="+15555550100",
+        audio_backend="alsa",
+        realtime_kind="off",
+    )
+    logger.close()
+
+    assert logger.path is not None
+    record = _read(logger.path)[0]
+    assert record["number"] == "+15555550100"
+    assert record["audio_backend"] == "alsa"
+    assert record["realtime_kind"] == "off"
+    assert "objective" not in record
+    assert "realtime_model" not in record
+    assert "realtime_voice" not in record
+
+
+def test_stores_conversation_text_verbatim(tmp_path: Path) -> None:
+    logger = TranscriptLogger(tmp_path, call_id=CALL_ID, clock=lambda: FIXED_NOW)
+    long_text = (
+        "ഹലോ, ഇത് വളരെ നീളമുള്ള ഒരു വാക്യമാണ്; pronouns, punctuation, "
+        'quotes like "this", and even an emoji 🙂 must survive exactly as spoken. '
+        "This second clause makes the sentence deliberately longer so no truncation "
+        "can hide the original content."
+    )
+
+    logger.transcript(long_text)
+    logger.reply(long_text)
+    logger.close()
+
+    assert len(long_text) > 200
+    assert logger.path is not None
+    raw = logger.path.read_text(encoding="utf-8")
+    assert "ഹലോ" in raw
+    assert "🙂" in raw
+    records = _read(logger.path)
+    assert records[0]["text"] == long_text
+    assert records[1]["text"] == long_text
 
 
 def test_file_is_0600_and_directory_is_0700(tmp_path: Path) -> None:

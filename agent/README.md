@@ -380,26 +380,28 @@ events are:
 
 | `event` | Additional fields |
 |---|---|
-| `call_start` | `direction` (`outbound`) and `number` (masked with `mask_number`) |
-| `transcript` | `role` (`callee`) and `text` |
-| `reply` | `role` (`agent`) and `text` |
+| `call_start` | `direction` (`outbound`), full E.164 `number`, `audio_backend`, `realtime_kind`, `objective` when non-empty, and `realtime_model`/`realtime_voice` for a Grok realtime call |
+| `transcript` | `role` (`callee`) and verbatim `text` |
+| `reply` | `role` (`agent`) and verbatim `text` |
 | `call_end` | `state`, `reason`, `turns`, and `duration_s` |
 
 Example:
 
 ```json
-{"ts":"2026-10-24T09:15:02.123+05:30","call_id":"8f3c...","event":"call_start","direction":"outbound","number":"*******0100"}
+{"ts":"2026-10-24T09:15:02.123+05:30","call_id":"8f3c...","event":"call_start","direction":"outbound","number":"+15555550100","audio_backend":"pipewire","realtime_kind":"grok","objective":"Confirm the appointment.","realtime_model":"grok-voice-3.0","realtime_voice":"ara"}
 {"ts":"2026-10-24T09:15:08.406+05:30","call_id":"8f3c...","event":"transcript","role":"callee","text":"Hello?"}
 {"ts":"2026-10-24T09:15:09.115+05:30","call_id":"8f3c...","event":"reply","role":"agent","text":"Hi, this is the telephone agent."}
 {"ts":"2026-10-24T09:15:31.900+05:30","call_id":"8f3c...","event":"call_end","state":"idle","reason":"completed","turns":1,"duration_s":29.7}
 ```
 
 The schema is extensible: consumers should ignore unknown events and fields.
-Audio is never written, and phone numbers are always masked; a raw E.164 number
-must not appear in a transcript file. Transcript text and the objective are
-personal data. Keep `directory` on the local device, restrict access to the
-service user, and apply a retention or deletion policy appropriate to the
-deployment. Do not include transcript files in backups that leave the device.
+Audio is never written. The local transcript is intentionally complete and is
+**not redacted**: it contains the full phone number, full conversation text, and
+call metadata, while operational stdout/journald logging remains masked.
+Transcript text and the objective are personal data. Keep `directory` on the
+local device, restrict access to the service user, and apply a retention or
+deletion policy appropriate to the deployment. Do not include transcript files
+in backups that leave the device.
 
 ## Plugging in STT, TTS, and an LLM
 

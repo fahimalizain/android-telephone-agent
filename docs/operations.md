@@ -191,15 +191,18 @@ the directory nor a file is created. `[transcript].directory` defaults to
 Each call gets one append-only, UTF-8 JSONL file named
 `YYYYmmddTHHMMSS-<short-id>.jsonl`. The directory is created with mode `0700` and files are mode
 `0600`. Every line has `ts` (ISO 8601 local wall-clock time with milliseconds), `call_id`, and
-`event`; current events are `call_start` (direction, masked number), `transcript` (role `callee`,
-text), `reply` (role `agent`, text), and `call_end` (state, reason, turns, duration_s). Audio is never
-written, and phone numbers are masked before they reach the file.
+`event`; current events are `call_start` (direction, full number, objective when non-empty,
+audio_backend, realtime_kind, and realtime model/voice for Grok), `transcript` (role `callee`,
+verbatim text), `reply` (role `agent`, verbatim text), and `call_end` (state, reason, turns,
+duration_s). Audio is never written.
 
-Treat transcript files as personal data. Keep them on the local device, readable only by the service
-user, and apply a retention or deletion policy appropriate to the deployment. They are excluded from
-git by the `runtime/` ignore rule, but do not include them in off-box backups unless the backup and
-retention policy explicitly covers call content. An I/O failure disables transcript writes for that
-call and logs a warning; it does not interrupt the call.
+Unlike operational logs, the local transcript is intentionally complete and not redacted: it
+contains the full phone number, full conversation text, and call metadata. Operational stdout and
+journald logging remain masked. Treat transcript files as personal data. Keep them on the local
+device, readable only by the service user, and apply a retention or deletion policy appropriate to
+the deployment. They are excluded from git by the `runtime/` ignore rule, but do not include them in
+off-box backups unless the backup and retention policy explicitly covers call content. An I/O
+failure disables transcript writes for that call and logs a warning; it does not interrupt the call.
 
 ## 7. SD card wear
 

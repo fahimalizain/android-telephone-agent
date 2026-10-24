@@ -439,7 +439,12 @@ def _build_session_factory(config: Config) -> SessionFactory:
         on_event: Callable[[SessionEvent], None],
     ) -> CallSession | GrokRealtimeSession:
         call_id = getattr(task, "id", "") or uuid.uuid4().hex
-        transcript = _open_transcript(config, call_id=call_id, number=task.number)
+        transcript = _open_transcript(
+            config,
+            call_id=call_id,
+            number=task.number,
+            objective=getattr(task, "objective", ""),
+        )
 
         def handle_event(event: SessionEvent) -> None:
             if transcript is not None:
@@ -559,13 +564,22 @@ def _open_transcript(
     *,
     call_id: str,
     number: str,
+    objective: str = "",
 ) -> TranscriptLogger | None:
-    """Create this call's transcript writer when the feature is enabled."""
+    """Create this call's complete local transcript when enabled."""
 
     if not config.transcript.enabled:
         return None
     transcript = TranscriptLogger(config.transcript.directory, call_id=call_id)
-    transcript.call_start(direction="outbound", number=number)
+    transcript.call_start(
+        direction="outbound",
+        number=number,
+        objective=objective,
+        audio_backend=config.audio.backend,
+        realtime_kind=config.realtime.kind,
+        realtime_model=config.realtime.model,
+        realtime_voice=config.realtime.voice,
+    )
     return transcript
 
 
