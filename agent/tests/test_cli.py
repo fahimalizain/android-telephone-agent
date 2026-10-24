@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import builtins
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from telephone_agent.__main__ import (
     _audio_from_config,
+    _build_session_factory,
     _check_pipewire_tools,
     _cmd_doctor,
     _cmd_selftest,
+    _cmd_serve,
     _dialer_from_config,
+    _serve,
+    _server_apps,
+    build_parser,
+    main,
 )
 from telephone_agent.audio import (
     AudioError,
@@ -20,7 +30,15 @@ from telephone_agent.audio import (
     GadgetAudio,
     PipeWireAudio,
 )
-from telephone_agent.config import AudioConfig, Config, DialerConfig
+from telephone_agent.config import (
+    AgentConfig,
+    AudioConfig,
+    Config,
+    ConfigError,
+    DialerConfig,
+    ServerConfig,
+)
+from telephone_agent.consult import ConsultationBroker
 
 ADDRESS = "AA:BB:CC:DD:EE:FF"
 
@@ -315,3 +333,346 @@ token = "test-token"
     assert "fake audio device" in captured.out
     if expected:
         assert "digital silence" in captured.err
+
+
+def _serve_config(
+    tmp_path: Path,
+    *,
+    token: str = "test-server-token",
+    host: str = "127.0.0.1",
+    public_url: str = "",
+) -> Path:
+    return _write_config(
+        tmp_path,
+        f"""
+phone_number = "+15555550100"
+
+[audio]
+card = "UAC1Gadget"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+
+[server]
+host = "{host}"
+token = "{token}"
+public_url = "{public_url}"
+""",
+    )
+
+
+def test_serve_subcommand_parses_and_dispatches(tmp_path: Path) -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["serve", "--config", str(tmp_path / "config.toml")])
+
+    assert args.command == "serve"
+    assert args.config == str(tmp_path / "config.toml")
+    assert args.handler is _cmd_serve
+
+
+def test_help_lists_serve_without_importing_server_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    real_import = builtins.__import__
+
+    def guarded_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "mcp" or name.startswith("mcp.") or name == "a2a" or name.startswith("a2a."):
+            raise ImportError(f"{name} is not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(["--help"])
+
+    assert excinfo.value.code == 0
+    assert "serve" in capsys.readouterr().out
+
+
+def test_server_apps_reports_missing_server_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def guarded_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "servers" or name.startswith("servers."):
+            raise ImportError("the server extra is not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    with pytest.raises(ConfigError, match="server dependencies are not installed"):
+        _server_apps(Config(server=ServerConfig(token="test-server-token")), service=object())
+
+
+def test_cmd_serve_requires_a_token(tmp_path: Path) -> None:
+    path = _serve_config(tmp_path, token="")
+
+    with pytest.raises(ConfigError, match="server.token is required"):
+        _cmd_serve(argparse.Namespace(config=str(path)))
+
+
+def test_cmd_serve_requires_public_url_off_loopback(tmp_path: Path) -> None:
+    path = _serve_config(tmp_path, host="192.168.1.50")
+
+    with pytest.raises(ConfigError, match="server.public_url is required"):
+        _cmd_serve(argparse.Namespace(config=str(path)))
+
+
+def test_cmd_serve_builds_and_runs_both_apps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _serve_config(tmp_path, token="super-secret-token")
+    service = object()
+    apps: list[tuple[object, str, int]] = [(object(), "127.0.0.1", 8765)]
+    calls: dict[str, object] = {}
+
+    def fake_build_service(config: Config) -> object:
+        calls["config"] = config
+        return service
+
+    def fake_server_apps(config: Config, built_service: object) -> list[tuple[object, str, int]]:
+        calls["apps_service"] = built_service
+        return apps
+
+    async def fake_serve(built_service: object, built_apps: object) -> None:
+        calls["service"] = built_service
+        calls["apps"] = built_apps
+
+    monkeypatch.setattr("telephone_agent.__main__._build_service", fake_build_service)
+    monkeypatch.setattr("telephone_agent.__main__._server_apps", fake_server_apps)
+    monkeypatch.setattr("telephone_agent.__main__._serve", fake_serve)
+
+    assert _cmd_serve(argparse.Namespace(config=str(path))) == 0
+
+    assert isinstance(calls["config"], Config)
+    assert calls["apps_service"] is service
+    assert calls["service"] is service
+    assert calls["apps"] is apps
+
+    captured = capsys.readouterr()
+    assert "MCP endpoint: http://127.0.0.1:8765/mcp" in captured.out
+    assert "A2A RPC endpoint: http://127.0.0.1:8766/a2a" in captured.out
+    assert "Agent Card: http://127.0.0.1:8766/.well-known/agent-card.json" in captured.out
+    assert "auth: bearer token required" in captured.out
+    assert "super-secret-token" not in captured.out
+    assert "super-secret-token" not in captured.err
+
+
+def test_cmd_serve_advertises_public_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _serve_config(tmp_path, public_url="https://agent.example.invalid/")
+    monkeypatch.setattr("telephone_agent.__main__._build_service", lambda _config: object())
+    monkeypatch.setattr("telephone_agent.__main__._server_apps", lambda _config, _service: [])
+
+    async def fake_serve(_service: object, _apps: object) -> None:
+        """Record nothing; the endpoint lines are the assertion."""
+
+    monkeypatch.setattr("telephone_agent.__main__._serve", fake_serve)
+
+    assert _cmd_serve(argparse.Namespace(config=str(path))) == 0
+
+    output = capsys.readouterr().out
+    assert "A2A RPC endpoint: https://agent.example.invalid/a2a" in output
+    assert "Agent Card: https://agent.example.invalid/.well-known/agent-card.json" in output
+    assert "MCP endpoint: http://127.0.0.1:8765/mcp" in output
+
+
+def test_main_serve_returns_2_for_blank_token(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _serve_config(tmp_path, token="")
+
+    assert main(["serve", "--config", str(path)]) == 2
+
+    captured = capsys.readouterr()
+    assert "server.token is required" in captured.err
+
+
+def test_build_session_factory_wires_a_deliberative_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(
+        audio=AudioConfig(card="UAC1Gadget"),
+        dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
+        agent=AgentConfig(consult_timeout_s=3.5, holding_phrase="Hold on."),
+    )
+    fake_audio = object()
+    fake_dialer = object()
+    fake_brain = object()
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_call_session(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr("telephone_agent.__main__._audio_from_config", lambda _config: fake_audio)
+    monkeypatch.setattr("telephone_agent.__main__._dialer_from_config", lambda _config: fake_dialer)
+    monkeypatch.setattr(
+        "telephone_agent.__main__.build_deliberative_brain",
+        lambda _config: fake_brain,
+    )
+    monkeypatch.setattr("telephone_agent.__main__.CallSession", fake_call_session)
+
+    def on_event(_event: object) -> None:
+        """Ignore session events."""
+
+    broker = ConsultationBroker()
+    stop_event = threading.Event()
+    task = SimpleNamespace(number="+15555550100", max_call_seconds=42.0)
+
+    session = _build_session_factory(config)(
+        task=task,
+        broker=broker,
+        stop_event=stop_event,
+        on_event=on_event,
+    )
+
+    assert session is sentinel
+    assert captured["audio"] is fake_audio
+    assert captured["dialer"] is fake_dialer
+    assert captured["deliberative"] is fake_brain
+    assert "brain" not in captured
+    assert captured["consultations"] is broker
+    assert captured["number"] == "+15555550100"
+    assert captured["max_call_seconds"] == 42.0
+    assert captured["silence_timeout_s"] == config.agent.silence_timeout_s
+    assert captured["vad_threshold"] == config.agent.vad_threshold
+    assert captured["consult_timeout_s"] == 3.5
+    assert captured["holding_phrase"] == "Hold on."
+    assert captured["on_event"] is on_event
+    assert captured["stop_event"] is stop_event
+
+
+def test_build_session_factory_uses_the_configured_call_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(
+        audio=AudioConfig(card="UAC1Gadget"),
+        dialer=DialerConfig(url="http://127.0.0.1:8765", token="test-token"),
+        agent=AgentConfig(max_call_seconds=120),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_call_session(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("telephone_agent.__main__._audio_from_config", lambda _config: object())
+    monkeypatch.setattr("telephone_agent.__main__._dialer_from_config", lambda _config: object())
+    monkeypatch.setattr(
+        "telephone_agent.__main__.build_deliberative_brain",
+        lambda _config: object(),
+    )
+    monkeypatch.setattr("telephone_agent.__main__.CallSession", fake_call_session)
+
+    _build_session_factory(config)(
+        task=SimpleNamespace(number="+15555550100", max_call_seconds=None),
+        broker=ConsultationBroker(),
+        stop_event=threading.Event(),
+        on_event=lambda _event: None,
+    )
+
+    assert captured["max_call_seconds"] == 120
+
+
+def test_serve_stops_every_listener_when_the_first_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uvicorn
+
+    created: list[object] = []
+
+    class FakeConfig:
+        def __init__(self, app: object, *, host: str, port: int, log_level: str) -> None:
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+
+    class FakeServer:
+        def __init__(self, config: FakeConfig) -> None:
+            self.config = config
+            self.should_exit = False
+            self.started = asyncio.Event()
+            self.stopped = asyncio.Event()
+            self.finish = asyncio.Event()
+            created.append(self)
+
+        async def serve(self) -> None:
+            self.started.set()
+            while not self.should_exit and not self.finish.is_set():
+                await asyncio.sleep(0.01)
+            self.stopped.set()
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.start_calls = 0
+            self.stop_calls = 0
+
+        async def start(self) -> None:
+            self.start_calls += 1
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    monkeypatch.setattr(uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+
+    async def scenario() -> None:
+        service = FakeService()
+        apps = [(object(), "127.0.0.1", 9101), (object(), "127.0.0.1", 9102)]
+        runner = asyncio.create_task(_serve(service, apps))
+
+        for _ in range(200):
+            if len(created) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(created) == 2
+
+        first = created[0]
+        second = created[1]
+        assert isinstance(first, FakeServer)
+        assert isinstance(second, FakeServer)
+        assert [server.config.port for server in (first, second)] == [9101, 9102]
+        assert await asyncio.wait_for(first.started.wait(), timeout=1.0)
+        assert await asyncio.wait_for(second.started.wait(), timeout=1.0)
+
+        first.finish.set()
+        await asyncio.wait_for(runner, timeout=2.0)
+
+        assert service.start_calls == 1
+        assert service.stop_calls == 1
+        assert first.should_exit is True
+        assert second.should_exit is True
+        assert first.stopped.is_set()
+        assert second.stopped.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_serve_stops_the_service_when_startup_fails() -> None:
+    class FailingService:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def start(self) -> None:
+            raise RuntimeError("worker failed")
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    service = FailingService()
+
+    with pytest.raises(RuntimeError, match="worker failed"):
+        asyncio.run(_serve(service, []))  # type: ignore[arg-type]
+
+    assert service.stop_calls == 1

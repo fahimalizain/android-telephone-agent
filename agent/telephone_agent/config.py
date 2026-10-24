@@ -113,13 +113,20 @@ class BrainConfig:
 
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
-    """Call-level policy: duration limits, endpointing, and language."""
+    """Call-level policy: duration limits, endpointing, language, and consultations.
+
+    ``consult_timeout_s`` bounds how long a deliberative brain may pause the call
+    for the requester's answer. ``holding_phrase`` is spoken before that pause so
+    the callee is not left in silence.
+    """
 
     schedule: str = ""
     max_call_seconds: int = 300
     silence_timeout_s: float = 20.0
     vad_threshold: float = -40.0
     language: str = "en"
+    consult_timeout_s: float = 8.0
+    holding_phrase: str = "One moment please."
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +372,15 @@ def _validate_agent(agent: AgentConfig) -> None:
         )
     if not agent.language.strip():
         raise ConfigError("agent.language is required; use a BCP-47 tag such as en-IN")
+    if not math.isfinite(agent.consult_timeout_s) or agent.consult_timeout_s <= 0:
+        raise ConfigError(
+            f"agent.consult_timeout_s must be a positive number (got {agent.consult_timeout_s})"
+        )
+    if not agent.holding_phrase.strip():
+        raise ConfigError(
+            "agent.holding_phrase is required; it is spoken before the call pauses "
+            "for the requester's answer"
+        )
 
 
 def _validate_server(server: ServerConfig) -> None:

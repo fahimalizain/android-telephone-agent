@@ -85,6 +85,11 @@ silence_timeout_s = 20.0
 vad_threshold = -40.0
 # BCP-47 tag used to label the call and passed to future speech adapters.
 language = "en-IN"
+# The holding phrase is spoken before the call pauses for the requester's
+# answer; the timeout bounds that pause. Keep both short enough that the callee
+# is not left in silence.
+consult_timeout_s = 8.0
+holding_phrase = "One moment please."
 
 [server]
 # Control-plane listeners shared by the MCP and A2A adapters. Both bind to
@@ -96,8 +101,8 @@ port = 8765
 # A2A JSON-RPC port.
 a2a_port = 8766
 # Bearer token required by both listeners on every route except /health. A
-# token must be at least 8 characters and is required to run the server; the
-# future `serve` command refuses to start without it. Prefer
+# token must be at least 8 characters and is required to run `serve`; the
+# command refuses to start without it. Prefer
 # TELEPHONE_AGENT_SERVER__TOKEN over storing a real token in this file, and
 # never log the token or put it in a URL.
 token = "replace-with-server-token"

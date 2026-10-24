@@ -167,6 +167,8 @@ actionable message.
 | `agent` | `silence_timeout_s` | `20.0` | Hang up after this much silence with no active utterance. Ringing time counts. |
 | `agent` | `vad_threshold` | `-40.0` | Speech threshold in dBFS, between -100 and 0. Tune on the device. |
 | `agent` | `language` | `en` | BCP-47 tag reserved for speech adapters. |
+| `agent` | `consult_timeout_s` | `8.0` | How long a mid-call consultation may pause the call for the requester's answer. |
+| `agent` | `holding_phrase` | `One moment please.` | Spoken before the call pauses for the requester's answer. |
 
 For Bluetooth HFP, the audio section looks like this:
 
@@ -264,6 +266,40 @@ python -m telephone_agent --help
 ```
 
 The same help is available from the installed console script.
+
+## Running the interop server
+
+The agent can be driven by other agents over MCP and A2A from one process, with
+both listeners sharing a single in-process `CallService` queue. Install the
+optional protocol dependencies and run the `serve` command:
+
+```bash
+cd agent
+pip install -e ".[server]"
+cd ..
+telephone-agent --config config/config.toml serve
+```
+
+`serve` requires `[server].token` (or `TELEPHONE_AGENT_SERVER__TOKEN`); it
+refuses to start without one and never prints the token. The process blocks
+until Ctrl-C and exposes:
+
+| Endpoint | URL |
+|---|---|
+| MCP Streamable HTTP | `http://<server.host>:<server.port>/mcp` |
+| A2A JSON-RPC | `http://<server.host>:<server.a2a_port>/a2a` |
+| A2A Agent Card | `http://<server.host>:<server.a2a_port>/.well-known/agent-card.json` |
+| Health, both listeners | `/health` |
+
+Every route except `/health` and the A2A Agent Card requires
+`Authorization: Bearer <server.token>`. Calls run one at a time, so a second
+request waits in the queue. Task state is held in memory and is lost on
+restart. `server.host` defaults to `127.0.0.1`, which only accepts connections
+from the same host. If you bind a LAN address, also set `server.public_url` so
+the A2A Agent Card advertises a URL that a requester can reach; the command
+refuses to start otherwise. Keep the listener on a trusted network and see
+[docs/interop.md](../docs/interop.md) for the protocol contract and security
+model. The optional `[server].audit_log` appends task events as JSONL.
 
 ## Plugging in STT, TTS, and an LLM
 
@@ -537,12 +573,14 @@ agent/
   pyproject.toml          packaging, console script, ruff and pytest settings
   README.md               this file
   telephone_agent/
-    __main__.py           doctor, dial, run, selftest
+    __main__.py           doctor, dial, run, serve, selftest
     config.py             TOML loading, environment overrides, validation
     audio.py              arecord/aplay and pw-record/pw-play backends, SCO discovery
     vad.py                RMS, dBFS, energy endpointer
     dialer.py             helper HTTP client with retries and idempotency
     brain.py              Brain protocol, EchoBrain, HttpBrain
     pipeline.py           CallSession state machine and adapter seams
+    service.py            long-lived task queue shared by the protocol adapters
+    servers/              MCP and A2A adapters (optional server extra)
   tests/                  stdlib-only tests; no hardware or network required
 ```

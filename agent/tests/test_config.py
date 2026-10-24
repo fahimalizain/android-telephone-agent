@@ -50,6 +50,8 @@ def test_load_applies_defaults(tmp_path: Path) -> None:
     assert config.agent == AgentConfig()
     assert config.brain.max_tokens == 200
     assert config.agent.vad_threshold == -40.0
+    assert config.agent.consult_timeout_s == 8.0
+    assert config.agent.holding_phrase == "One moment please."
     assert config.server == ServerConfig()
     assert config.server.host == "127.0.0.1"
     assert config.server.port == 8765
@@ -94,6 +96,8 @@ max_call_seconds = 120
 silence_timeout_s = 12.5
 vad_threshold = -35.0
 language = "ml-IN"
+consult_timeout_s = 3.5
+holding_phrase = "Hold on."
 """,
     )
 
@@ -112,6 +116,8 @@ language = "ml-IN"
     assert config.agent.schedule == "0 9 * * *"
     assert config.agent.language == "ml-IN"
     assert config.agent.vad_threshold == -35.0
+    assert config.agent.consult_timeout_s == 3.5
+    assert config.agent.holding_phrase == "Hold on."
     assert "secret-token" not in repr(config)
     assert "test-key" not in repr(config)
     assert "+15555550199" not in repr(config)
@@ -130,6 +136,8 @@ def test_environment_overrides_toml(tmp_path: Path) -> None:
         "TELEPHONE_AGENT_BRAIN__MODEL": "local",
         "TELEPHONE_AGENT_AGENT__SILENCE_TIMEOUT_S": "7.5",
         "TELEPHONE_AGENT_AGENT__VAD_THRESHOLD": "-30",
+        "TELEPHONE_AGENT_AGENT__CONSULT_TIMEOUT_S": "3.5",
+        "TELEPHONE_AGENT_AGENT__HOLDING_PHRASE": "Hold on.",
     }
 
     config = load(_write(tmp_path), env=env)
@@ -145,6 +153,8 @@ def test_environment_overrides_toml(tmp_path: Path) -> None:
     assert config.brain.api_key == ""
     assert config.agent.silence_timeout_s == 7.5
     assert config.agent.vad_threshold == -30.0
+    assert config.agent.consult_timeout_s == 3.5
+    assert config.agent.holding_phrase == "Hold on."
 
 
 def test_environment_overrides_server(tmp_path: Path) -> None:
@@ -566,6 +576,11 @@ model = "local"
         ("[agent]\nvad_threshold = 3", "vad_threshold"),
         ("[agent]\nvad_threshold = -101", "vad_threshold"),
         ('[agent]\nlanguage = "  "', "language"),
+        ("[agent]\nconsult_timeout_s = 0", "consult_timeout_s"),
+        ("[agent]\nconsult_timeout_s = -1", "consult_timeout_s"),
+        ("[agent]\nconsult_timeout_s = nan", "consult_timeout_s"),
+        ('[agent]\nholding_phrase = ""', "holding_phrase"),
+        ('[agent]\nholding_phrase = "   "', "holding_phrase"),
     ],
 )
 def test_agent_validation(tmp_path: Path, agent_block: str, message: str) -> None:

@@ -10,18 +10,23 @@ Exit codes follow the repository contract:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import shutil
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .audio import AudioDevice, AudioError, GadgetAudio, PipeWireAudio
-from .brain import BrainError, build_brain
+from .brain import BrainError, build_brain, build_deliberative_brain
 from .config import Config, ConfigError, DialerConfig, ensure_e164, load
+from .consult import ConsultationBroker
 from .dialer import Dialer, DialerError, mask_number
-from .pipeline import CallEndReason, CallSession, CallState
+from .pipeline import CallEndReason, CallSession, CallState, SessionEvent
+from .service import CallService, CallTask, SessionFactory
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  telephone-agent --config config/config.toml doctor\n"
             "  telephone-agent --config config/config.toml selftest\n"
             "  telephone-agent --config config/config.toml dial --number +15555550100\n"
-            "  telephone-agent --config config/config.toml run"
+            "  telephone-agent --config config/config.toml run\n"
+            "  telephone-agent --config config/config.toml serve"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -62,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{doctor,dial,run,selftest}",
+        metavar="{doctor,dial,run,serve,selftest}",
     )
 
     doctor = subparsers.add_parser(
@@ -104,6 +110,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="destination in E.164 format; overrides phone_number in the config",
     )
     run.set_defaults(handler=_cmd_run)
+
+    serve = subparsers.add_parser(
+        "serve",
+        help="serve MCP and A2A endpoints for other agents (one call at a time)",
+        description=(
+            "Run one long-lived CallService and expose it to other agents over "
+            "MCP (Streamable HTTP) and A2A (JSON-RPC). Both listeners share one "
+            "queue and place at most one call at a time. Requires the optional "
+            "server extra and [server].token."
+        ),
+    )
+    serve.add_argument(
+        "--config",
+        metavar="PATH",
+        default=argparse.SUPPRESS,
+        help="TOML configuration file; overrides the global --config",
+    )
+    serve.set_defaults(handler=_cmd_serve)
 
     selftest = subparsers.add_parser(
         "selftest",
@@ -316,6 +340,143 @@ def _cmd_selftest(args: argparse.Namespace) -> int:
             )
         return 1
     return 0
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    config = load(Path(args.config))
+    if not config.server.token.strip():
+        raise ConfigError(
+            "server.token is required to run serve; set [server].token or "
+            "TELEPHONE_AGENT_SERVER__TOKEN"
+        )
+    if config.server.host not in {"127.0.0.1", "localhost", "::1"} and not config.server.public_url:
+        raise ConfigError(
+            "server.public_url is required when server.host is not loopback, because "
+            "the A2A Agent Card must advertise a reachable URL"
+        )
+
+    service = _build_service(config)
+    apps = _server_apps(config, service)
+
+    mcp_base = f"http://{config.server.host}:{config.server.port}"
+    a2a_base = (
+        config.server.public_url or f"http://{config.server.host}:{config.server.a2a_port}"
+    ).rstrip("/")
+    print(f"MCP endpoint: {mcp_base}/mcp")
+    print(f"A2A RPC endpoint: {a2a_base}/a2a")
+    print(f"Agent Card: {a2a_base}/.well-known/agent-card.json")
+    print("auth: bearer token required")
+
+    asyncio.run(_serve(service, apps))
+    return 0
+
+
+def _build_service(config: Config) -> CallService:
+    """Build the long-lived service shared by both protocol listeners."""
+
+    return CallService(
+        session_factory=_build_session_factory(config),
+        default_number=config.phone_number,
+        audit_path=config.server.audit_log or None,
+    )
+
+
+def _build_session_factory(config: Config) -> SessionFactory:
+    """Return a factory that builds one deliberative session per delegated call.
+
+    The service calls the factory from a worker thread with keyword arguments.
+    Each call gets a fresh audio device, dialer, and brain so one call cannot
+    leak state into the next.
+    """
+
+    def build(
+        *,
+        task: CallTask,
+        broker: ConsultationBroker,
+        stop_event: threading.Event,
+        on_event: Callable[[SessionEvent], None],
+    ) -> CallSession:
+        audio = _audio_from_config(config)
+        dialer = _dialer_from_config(config.dialer)
+        brain = build_deliberative_brain(config.brain)
+        return CallSession(
+            audio=audio,
+            dialer=dialer,
+            deliberative=brain,
+            consultations=broker,
+            number=task.number,
+            max_call_seconds=(
+                task.max_call_seconds
+                if task.max_call_seconds is not None
+                else config.agent.max_call_seconds
+            ),
+            silence_timeout_s=config.agent.silence_timeout_s,
+            vad_threshold=config.agent.vad_threshold,
+            consult_timeout_s=config.agent.consult_timeout_s,
+            holding_phrase=config.agent.holding_phrase,
+            on_event=on_event,
+            stop_event=stop_event,
+        )
+
+    return build
+
+
+def _server_apps(config: Config, service: CallService) -> list[tuple[object, str, int]]:
+    """Build the MCP and A2A applications and their bind addresses.
+
+    The imports are local so ``--help``, ``doctor``, ``dial``, ``run``, and
+    ``selftest`` keep working when the optional ``server`` extra is absent.
+    """
+
+    try:
+        from .servers.a2a import create_a2a_app
+        from .servers.mcp import create_mcp_app
+    except ImportError as exc:
+        raise ConfigError(
+            "server dependencies are not installed; run "
+            "`pip install -e '.[server]'` in the agent directory"
+        ) from exc
+
+    mcp_app = create_mcp_app(service, host=config.server.host, token=config.server.token)
+    a2a_app = create_a2a_app(
+        service,
+        host=config.server.host,
+        port=config.server.a2a_port,
+        token=config.server.token,
+        public_url=config.server.public_url,
+    )
+    return [
+        (mcp_app, config.server.host, config.server.port),
+        (a2a_app, config.server.host, config.server.a2a_port),
+    ]
+
+
+async def _serve(service: CallService, apps: Sequence[tuple[object, str, int]]) -> None:
+    """Run the service and every protocol app until the first listener exits.
+
+    Uvicorn owns signal handling. When one listener stops, for any reason, the
+    others are told to exit so the process shuts down cleanly on both ports.
+    The service is stopped even if a listener fails before it starts.
+    """
+
+    import uvicorn
+
+    servers: list[Any] = []
+    tasks: list[asyncio.Task[None]] = []
+    try:
+        await service.start()
+        for app, host, port in apps:
+            server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info"))
+            servers.append(server)
+            tasks.append(asyncio.create_task(server.serve()))
+        if tasks:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for server in servers:
+            server.should_exit = True
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await service.stop()
 
 
 def _build_session(config: Config, number: str) -> CallSession:

@@ -27,6 +27,9 @@ unavailable or inconvenient; USB remains the default and canonical path. See the
 [Bluetooth HFP guide](docs/bluetooth-hfp.md) and
 [ADR 0006](docs/decisions/0006-use-bluetooth-hfp-audio.md).
 
+Other agents can delegate calls to the runtime over MCP and A2A; one process serves both
+endpoints from a single call queue. See the [interoperability guide](docs/interop.md).
+
 ## What this is not
 
 - Not an interception or injection tool for a call already in progress on your phone.
