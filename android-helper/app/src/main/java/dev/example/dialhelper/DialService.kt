@@ -14,6 +14,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.SystemClock
+import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.util.Log
@@ -27,8 +29,10 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
@@ -59,26 +63,31 @@ class DialService : Service() {
     private const val MAX_HEADER_COUNT = 64
     private const val MAX_BODY_BYTES = 4096
     private const val SOCKET_TIMEOUT_MS = 5_000
+    private const val REQUEST_DEADLINE_MS = 10_000L
 
     /**
-     * Replace this value with at least 32 random bytes before building.
-     * See android-helper/README.md for generation and rotation.
+     * Injected at build time from the dialHelperToken Gradle property (for
+     * example in $GRADLE_USER_HOME/gradle.properties). When the property is
+     * unset the build falls back to a placeholder, and tokenConfigured() keeps
+     * /call and /hangup disabled. See android-helper/README.md for generation
+     * and rotation.
      *
      * Production hardening: a token compiled into the APK can be extracted from
      * the APK. Prefer a per-install secret provisioned at runtime, and treat
      * anyone holding the token as authorized to place calls.
      */
-    private const val API_TOKEN = "REPLACE_WITH_32_BYTE_RANDOM_TOKEN"
+    private val API_TOKEN = BuildConfig.API_TOKEN
 
     /**
      * Case-insensitive substring of the PhoneAccount label for the agent SIM,
-     * for example "Jio" or "Airtel". Leave empty on a single-SIM device.
+     * for example "Jio" or "Airtel". Injected at build time from the
+     * dialHelperSimLabel Gradle property; empty on a single-SIM device.
      *
      * On a dual-SIM device, leaving this empty makes the helper refuse to guess:
      * POST /call returns 503 instead of showing a SIM picker on the locked screen.
      * Verify the label on your device via GET /health.
      */
-    private const val AGENT_SIM_LABEL = ""
+    private val AGENT_SIM_LABEL = BuildConfig.AGENT_SIM_LABEL
 
     /**
      * How long a placed call is assumed to remain active. This is a heuristic:
@@ -87,7 +96,10 @@ class DialService : Service() {
      */
     private const val CALL_WINDOW_MS = 10 * 60 * 1000L
 
-    private val E164 = Regex("^\\+[1-9]\\d{6,14}$")
+    /** Keep a successful hangup observable for a retry that lost its response. */
+    private const val HANGUP_GRACE_MS = 60 * 1000L
+
+    private val E164 = Regex("^\\+[1-9][0-9]{6,14}$")
   }
 
   private val telecom: TelecomManager by lazy {
@@ -101,8 +113,16 @@ class DialService : Service() {
 
   private val callLock = Any()
 
+  // Bound concurrent client handlers so an unauthenticated slowloris cannot
+  // exhaust threads or file descriptors. The reference still has no per-IP
+  // rate limiting; see the limitations in README.md.
+  private val clientSlots = Semaphore(8)
+
   @Volatile
   private var lastCallAt = 0L
+
+  @Volatile
+  private var lastHangupAt = 0L
 
   override fun onCreate() {
     super.onCreate()
@@ -174,55 +194,89 @@ class DialService : Service() {
   // TLS here (SSLServerSocket) or in front of the service before exposing it
   // beyond a trusted network. The bearer token is the only access control.
   private fun serve() {
+    var socket: ServerSocket? = null
     try {
-      val socket = ServerSocket().apply {
+      val server = ServerSocket().apply {
         reuseAddress = true
         bind(InetSocketAddress("0.0.0.0", PORT))
       }
-      if (!running.get()) {
-        socket.close()
-        return
-      }
-      serverSocket = socket
+      // Publish the socket before the liveness check so onDestroy() can always
+      // close it, including a stop/start race during startup.
+      socket = server
+      serverSocket = server
+      if (!running.get()) return
       Log.i(TAG, "listening on 0.0.0.0:$PORT")
 
       while (running.get()) {
         val client = try {
-          socket.accept()
+          server.accept()
         } catch (e: IOException) {
           if (running.get()) Log.e(TAG, "accept failed", e)
           break
         }
-        // Production hardening: replace one-thread-per-connection with a bounded
-        // thread pool, a connection cap, and per-source rate limiting.
-        thread(name = "dial-helper-client", isDaemon = true) {
-          client.use {
+        if (!clientSlots.tryAcquire()) {
+          Log.w(TAG, "connection limit reached; rejecting client")
+          try {
+            client.close()
+          } catch (e: IOException) {
+            Log.w(TAG, "could not close rejected client: ${e.javaClass.simpleName}")
+          }
+          continue
+        }
+        try {
+          thread(name = "dial-helper-client", isDaemon = true) {
             try {
-              handle(it)
+              client.use { handle(it) }
             } catch (e: IOException) {
               Log.w(TAG, "connection failed: ${e.javaClass.simpleName}")
             } catch (e: RuntimeException) {
               Log.w(TAG, "request failed: ${e.javaClass.simpleName}")
+            } finally {
+              clientSlots.release()
             }
           }
+        } catch (e: RuntimeException) {
+          clientSlots.release()
+          try {
+            client.close()
+          } catch (closeError: IOException) {
+            Log.w(TAG, "could not close client: ${closeError.javaClass.simpleName}")
+          }
+          Log.w(TAG, "could not start client handler: ${e.javaClass.simpleName}")
         }
       }
     } catch (e: IOException) {
-      Log.e(TAG, "server loop stopped", e)
+      Log.e(TAG, "server loop stopped: ${e.javaClass.simpleName}")
+      if (running.get()) {
+        Log.e(TAG, "listener unavailable; stopping service so it can restart")
+        stopSelf()
+      }
     } finally {
-      running.set(false)
+      try {
+        socket?.close()
+      } catch (e: IOException) {
+        Log.w(TAG, "socket close failed: ${e.javaClass.simpleName}")
+      }
+      // Only the thread that still owns the field may clear it. A late old
+      // thread must not clobber a newer server after a restart.
+      if (serverSocket === socket) {
+        serverSocket = null
+        running.set(false)
+      }
       Log.i(TAG, "server loop exited")
     }
   }
 
   private fun handle(client: Socket) {
-    // Per-connection read timeout for slow or idle clients.
+    // Per-read timeout plus an absolute deadline: a client cannot hold a
+    // worker indefinitely by trickling headers or a body.
     client.soTimeout = SOCKET_TIMEOUT_MS
+    val deadline = SystemClock.elapsedRealtime() + REQUEST_DEADLINE_MS
     val input = BufferedInputStream(client.getInputStream())
     val output = client.getOutputStream()
 
     val requestLine = try {
-      readLine(input, MAX_LINE_BYTES)
+      readLine(input, MAX_LINE_BYTES, deadline)
     } catch (e: IllegalArgumentException) {
       writeResponse(output, 400, errorBody("request line too long"))
       return
@@ -244,7 +298,7 @@ class DialService : Service() {
     try {
       var count = 0
       while (true) {
-        val line = readLine(input, MAX_LINE_BYTES) ?: break
+        val line = readLine(input, MAX_LINE_BYTES, deadline) ?: break
         if (line.isEmpty()) break
         count++
         if (count > MAX_HEADER_COUNT) {
@@ -275,7 +329,7 @@ class DialService : Service() {
     }
 
     val body = if (contentLength != null && contentLength > 0) {
-      readBody(input, contentLength)
+      readBody(input, contentLength, deadline)
     } else {
       ""
     }
@@ -347,7 +401,14 @@ class DialService : Service() {
     }
 
     synchronized(callLock) {
-      val now = System.currentTimeMillis()
+      if (checkSelfPermission(Manifest.permission.CALL_PHONE) !=
+        PackageManager.PERMISSION_GRANTED
+      ) {
+        Log.w(TAG, "placeCall denied; CALL_PHONE not granted")
+        return Response(403, errorBody("call permission denied"))
+      }
+
+      val now = SystemClock.elapsedRealtime()
       if (lastCallAt != 0L && now - lastCallAt < CALL_WINDOW_MS) {
         return Response(409, errorBody("call already active"))
       }
@@ -363,16 +424,20 @@ class DialService : Service() {
       try {
         telecom.placeCall(Uri.fromParts("tel", number, null), extras)
       } catch (e: SecurityException) {
-        Log.e(TAG, "placeCall denied; check CALL_PHONE", e)
-        return Response(500, errorBody("call permission denied"))
+        // A missing runtime permission is a provisioning error, not a
+        // transient 5xx that the client should retry.
+        Log.e(TAG, "placeCall denied: ${e.javaClass.simpleName}")
+        return Response(403, errorBody("call permission denied"))
       } catch (e: RuntimeException) {
-        Log.e(TAG, "placeCall failed", e)
+        // Do not log the throwable: a platform exception may contain the URI.
+        Log.e(TAG, "placeCall failed: ${e.javaClass.simpleName}")
         return Response(500, errorBody("call failed"))
       }
 
       lastCallAt = now
-      // Never log the destination number. The account label is not sensitive.
-      Log.i(TAG, "outbound call requested account=${accountLabel(account) ?: "unknown"}")
+      lastHangupAt = 0L
+      // Never log the destination number.
+      Log.i(TAG, "outbound call requested")
       return Response(202, JSONObject().put("state", "dialing"))
     }
   }
@@ -380,13 +445,15 @@ class DialService : Service() {
   @Suppress("DEPRECATION")
   private fun hangup(): Response {
     synchronized(callLock) {
-      val started = lastCallAt
-      if (started == 0L || System.currentTimeMillis() - started >= CALL_WINDOW_MS) {
+      val now = SystemClock.elapsedRealtime()
+      if (lastCallAt == 0L) {
+        // A retry after a lost 202 should observe the same success for a short
+        // grace period instead of a misleading 409.
+        if (lastHangupAt != 0L && now - lastHangupAt < HANGUP_GRACE_MS) {
+          return Response(202, JSONObject().put("state", "hangup-requested"))
+        }
         return Response(409, errorBody("no active call"))
       }
-
-      // Clear the window before attempting endCall so a retry is idempotent.
-      lastCallAt = 0L
 
       if (checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) !=
         PackageManager.PERMISSION_GRANTED
@@ -397,40 +464,86 @@ class DialService : Service() {
 
       return try {
         if (telecom.endCall()) {
+          // Clear the window only after the platform confirms the hangup.
+          // Otherwise a failed or refused endCall could let a second /call
+          // overlap the call that is still active.
+          lastCallAt = 0L
+          lastHangupAt = now
           Log.i(TAG, "hangup requested")
           Response(202, JSONObject().put("state", "hangup-requested"))
         } else {
           // No foreground call was ended (already finished, or not permitted).
+          // Keep the window so /call cannot overlap a possibly active call.
           Log.w(TAG, "endCall returned false")
           Response(202, JSONObject().put("state", "hangup-unavailable"))
         }
       } catch (e: SecurityException) {
         // Common on modern Android for apps that are not the default dialer.
-        Log.w(TAG, "endCall denied", e)
+        Log.w(TAG, "endCall denied: ${e.javaClass.simpleName}")
         Response(202, JSONObject().put("state", "hangup-unavailable"))
       } catch (e: RuntimeException) {
-        Log.w(TAG, "endCall failed", e)
+        Log.w(TAG, "endCall failed: ${e.javaClass.simpleName}")
         Response(202, JSONObject().put("state", "hangup-unavailable"))
       }
     }
   }
 
-  private fun callAccounts(): List<PhoneAccountHandle> = try {
+  private fun callAccounts(): List<PhoneAccountHandle> {
     // getCallCapablePhoneAccounts() requires READ_PHONE_STATE on most builds
     // unless this app is the default dialer, which it should not be.
-    telecom.callCapablePhoneAccounts
-  } catch (e: RuntimeException) {
-    Log.e(TAG, "phone account enumeration failed; check READ_PHONE_STATE", e)
-    emptyList()
+    if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) !=
+      PackageManager.PERMISSION_GRANTED
+    ) {
+      Log.w(TAG, "READ_PHONE_STATE not granted; cannot enumerate phone accounts")
+      return emptyList()
+    }
+    return try {
+      telecom.callCapablePhoneAccounts
+    } catch (e: RuntimeException) {
+      Log.e(TAG, "phone account enumeration failed; check READ_PHONE_STATE", e)
+      emptyList()
+    }
+  }
+
+  private fun simAccounts(): List<PhoneAccountHandle> {
+    val accounts = callAccounts()
+    if (accounts.isEmpty()) return emptyList()
+
+    // getPhoneAccount() needs READ_PHONE_NUMBERS on target 31+. If it is
+    // missing, keep single-SIM devices working but never guess between two
+    // accounts; the install script and launcher request the permission.
+    if (checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS) !=
+      PackageManager.PERMISSION_GRANTED
+    ) {
+      Log.w(TAG, "READ_PHONE_NUMBERS not granted; cannot distinguish SIM accounts")
+      return accounts.singleOrNull()?.let { listOf(it) } ?: emptyList()
+    }
+
+    return accounts.filter { handle ->
+      val account = try {
+        telecom.getPhoneAccount(handle)
+      } catch (e: RuntimeException) {
+        Log.w(TAG, "phone account lookup failed: ${e.javaClass.simpleName}")
+        null
+      }
+      account != null &&
+        (account.capabilities and PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION) != 0
+    }
   }
 
   private fun agentAccount(): PhoneAccountHandle? {
-    val accounts = callAccounts()
+    val accounts = simAccounts()
     if (accounts.isEmpty()) return null
     if (AGENT_SIM_LABEL.isBlank()) return accounts.singleOrNull()
-    return accounts.firstOrNull { handle ->
+
+    val matches = accounts.filter { handle ->
       accountLabel(handle)?.contains(AGENT_SIM_LABEL, ignoreCase = true) == true
     }
+    if (matches.size != 1) {
+      Log.w(TAG, "SIM label matched ${matches.size} accounts; refusing to guess")
+      return null
+    }
+    return matches.single()
   }
 
   private fun accountLabel(handle: PhoneAccountHandle): String? = try {
@@ -441,7 +554,7 @@ class DialService : Service() {
   }
 
   private fun simLabel(): String {
-    val accounts = callAccounts()
+    val accounts = simAccounts()
     if (accounts.isEmpty()) return "unknown"
     val selected = agentAccount()
     if (selected != null) return accountLabel(selected) ?: "unknown"
@@ -449,10 +562,13 @@ class DialService : Service() {
     return labels.joinToString(",").ifEmpty { "unknown" }
   }
 
-  private fun readBody(input: InputStream, length: Int): String {
+  private fun readBody(input: InputStream, length: Int, deadline: Long): String {
     val data = ByteArray(length)
     var offset = 0
     while (offset < length) {
+      if (SystemClock.elapsedRealtime() > deadline) {
+        throw SocketTimeoutException("request deadline exceeded")
+      }
       val read = input.read(data, offset, length - offset)
       if (read < 0) break
       offset += read
@@ -460,9 +576,12 @@ class DialService : Service() {
     return String(data, 0, offset, StandardCharsets.UTF_8)
   }
 
-  private fun readLine(input: InputStream, limit: Int): String? {
+  private fun readLine(input: InputStream, limit: Int, deadline: Long): String? {
     val buffer = ByteArrayOutputStream()
     while (true) {
+      if (SystemClock.elapsedRealtime() > deadline) {
+        throw SocketTimeoutException("request deadline exceeded")
+      }
       val byte = input.read()
       if (byte == -1) {
         return if (buffer.size() == 0) {
@@ -503,6 +622,7 @@ class DialService : Service() {
     202 -> "Accepted"
     400 -> "Bad Request"
     401 -> "Unauthorized"
+    403 -> "Forbidden"
     404 -> "Not Found"
     405 -> "Method Not Allowed"
     409 -> "Conflict"
