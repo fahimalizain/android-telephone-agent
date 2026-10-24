@@ -27,6 +27,17 @@ from .audio import AudioDevice, AudioError, PipeWireAudio
 from .brain import BrainError, build_brain, build_deliberative_brain
 from .config import Config, ConfigError, DialerConfig, ensure_e164, load
 from .consult import ConsultationBroker
+from .daemon import (
+    BusyError,
+    CallExecutor,
+    CallHandle,
+    CallRequest,
+    ControlServer,
+    DaemonClient,
+    DaemonError,
+    DaemonUnavailableError,
+    resolve_socket_path,
+)
 from .dialer import Dialer, DialerError, mask_number
 from .grok_realtime import (
     GrokRealtimeError,
@@ -60,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  telephone-agent --config config/config.toml selftest\n"
             "  telephone-agent --config config/config.toml dial --number +15555550100\n"
             "  telephone-agent --config config/config.toml run\n"
+            "  telephone-agent --config config/config.toml run --direct\n"
+            "  telephone-agent --config config/config.toml daemon\n"
             "  telephone-agent --config config/config.toml inbound --once\n"
             "  telephone-agent --config config/config.toml serve"
         ),
@@ -80,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{doctor,dial,run,inbound,serve,selftest}",
+        metavar="{doctor,dial,run,inbound,daemon,serve,selftest}",
     )
 
     doctor = subparsers.add_parser(
@@ -110,11 +123,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser(
         "run",
-        help="place a call and run the conversation loop until hangup",
+        help="submit one call to the daemon and wait for the result",
         description=(
-            "Place one call and run the conversation loop. The default path uses "
-            "the text pipeline; set realtime.kind = 'grok' for the full-duplex "
-            "Grok Voice speech-to-speech adapter."
+            "Submit one outbound call to the long-lived daemon over its local "
+            "Unix socket and print the result. The daemon owns the audio and call "
+            "engine, so inbound and outbound calls are serialized. Use --direct "
+            "to run the call in this process instead, which is useful for "
+            "debugging but conflicts with a running daemon."
         ),
     )
     run.add_argument(
@@ -122,16 +137,23 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="E164",
         help="destination in E.164 format; overrides phone_number in the config",
     )
+    run.add_argument(
+        "--direct",
+        action="store_true",
+        help="run the call in this process instead of submitting it to the daemon",
+    )
     run.set_defaults(handler=_cmd_run)
 
     inbound = subparsers.add_parser(
         "inbound",
-        help="answer incoming calls and run the voice agent",
+        help="answer incoming calls and run the voice agent (foreground debug)",
         description=(
             "Poll the helper for inbound calls, answer a ringing call, and run "
             "one Grok Voice realtime session per answered call. Requires "
             "realtime.kind = 'grok'; the text pipeline has no inbound path. "
-            "Every ringing call on the agent SIM is answered automatically."
+            "Every ringing call on the agent SIM is answered automatically. "
+            "The daemon command runs this watcher alongside the control socket; "
+            "use inbound for inbound-only foreground debugging."
         ),
     )
     inbound.add_argument(
@@ -140,6 +162,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="answer at most one call, then exit",
     )
     inbound.set_defaults(handler=_cmd_inbound)
+
+    daemon = subparsers.add_parser(
+        "daemon",
+        help="own the call engine and serve inbound and outbound calls",
+        description=(
+            "Run one long-lived process that owns the Bluetooth audio path and "
+            "the phone. It serves outbound calls from `run` over a local Unix "
+            "socket and answers inbound calls with the same executor, so only "
+            "one call is active at a time. Requires realtime.kind = 'grok'."
+        ),
+    )
+    daemon.set_defaults(handler=_cmd_daemon)
 
     serve = subparsers.add_parser(
         "serve",
@@ -193,7 +227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 1
-    except (AudioError, BrainError, DialerError, GrokRealtimeError) as exc:
+    except (AudioError, BrainError, DialerError, DaemonError, GrokRealtimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except Exception:
@@ -322,6 +356,14 @@ def _cmd_dial(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     config = load(Path(args.config))
     number = _resolve_number(config, args.number)
+    if getattr(args, "direct", False):
+        return _run_direct(config, number)
+    return _run_via_daemon(config, number)
+
+
+def _run_direct(config: Config, number: str) -> int:
+    """Run one call in this process, preserving the pre-daemon behavior."""
+
     transcript = _open_transcript(config, call_id=uuid.uuid4().hex, number=number)
     try:
         session = _build_session(
@@ -341,6 +383,205 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if result.state is CallState.FAILED or result.reason is CallEndReason.INTERRUPTED:
         return 1
     return 0
+
+
+def _run_via_daemon(config: Config, number: str) -> int:
+    """Submit one outbound call to the local daemon and print its result."""
+
+    path = resolve_socket_path(config.daemon.socket)
+    client = DaemonClient(path)
+
+    def interrupt() -> None:
+        try:
+            DaemonClient(path).hangup(timeout_s=2.0)
+        except DaemonError as exc:
+            logger.warning("cannot ask the daemon to hang up: %s", exc)
+
+    print(f"placing call to {mask_number(number)} via daemon at {path}")
+    try:
+        reply = client.call(
+            number,
+            max_call_seconds=config.agent.max_call_seconds,
+            on_interrupt=interrupt,
+        )
+    except DaemonUnavailableError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        print(
+            "start telephone-agent-daemon.service (or run `telephone-agent daemon`) "
+            "or pass --direct to run the call in this process",
+            file=sys.stderr,
+        )
+        return 1
+    except DaemonError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    payload = reply.payload
+    if not payload.get("ok"):
+        error = str(payload.get("error", "failed"))
+        message = str(payload.get("message", "") or error)
+        print(f"error: daemon rejected the call ({error}): {message}", file=sys.stderr)
+        return 2 if error == "invalid" else 1
+
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        print("error: the daemon returned a malformed result", file=sys.stderr)
+        return 1
+
+    state = str(result.get("state", "failed"))
+    reason = str(result.get("reason", "failed"))
+    try:
+        turns = int(result.get("turns", 0))  # type: ignore[arg-type]
+        duration = float(result.get("duration_s", 0.0))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        print("error: the daemon returned a malformed result", file=sys.stderr)
+        return 1
+    print(f"call ended: state={state} reason={reason} turns={turns} duration={duration:.1f}s")
+    if (
+        reply.interrupted
+        or state == CallState.FAILED.value
+        or reason == CallEndReason.INTERRUPTED.value
+    ):
+        return 1
+    return 0
+
+
+def _cmd_daemon(args: argparse.Namespace) -> int:
+    config = load(Path(args.config))
+    if config.realtime.kind != "grok":
+        raise ConfigError(
+            "daemon requires realtime.kind = 'grok'; it answers inbound calls and "
+            "the text pipeline has no inbound audio path. Set realtime.kind = "
+            "'grok' and configure the Grok Voice adapter."
+        )
+
+    stop_event = threading.Event()
+    previous_handlers = _install_stop_handlers(stop_event)
+    executor = CallExecutor(
+        session_factory=_daemon_session_factory(config),
+        transcript_factory=_daemon_transcript_factory(config),
+    )
+    server = ControlServer(config.daemon.socket, executor)
+    handled = 0
+    try:
+        executor.start()
+        server.start()
+        print(f"socket: {server.path}")
+        print("serving inbound and outbound calls")
+        watcher = InboundWatcher(
+            dialer=_dialer_from_config(config.dialer),
+            session_factory=_executor_inbound_factory(executor, config),
+            stop_event=stop_event,
+            config=config.inbound,
+            can_accept=lambda: not executor.busy,
+        )
+        handled = watcher.run()
+    finally:
+        stop_event.set()
+        executor.hangup()
+        server.stop()
+        executor.stop()
+        _restore_signal_handlers(previous_handlers)
+
+    print(f"daemon stopped after {handled} inbound call(s)")
+    return 0
+
+
+def _daemon_session_factory(
+    config: Config,
+) -> Callable[[CallRequest, Callable[[SessionEvent], None]], GrokRealtimeSession]:
+    """Build one fresh Grok Voice session per daemon call request."""
+
+    def build(
+        request: CallRequest,
+        on_event: Callable[[SessionEvent], None],
+    ) -> GrokRealtimeSession:
+        audio = _audio_from_config(config)
+        dialer = _dialer_from_config(config.dialer)
+        limit = (
+            request.max_call_seconds
+            if request.max_call_seconds is not None
+            else config.agent.max_call_seconds
+        )
+        return _build_realtime_session(
+            config,
+            audio,
+            dialer,
+            request.number,
+            objective=request.objective,
+            stop_event=request.stop_event,
+            on_event=on_event,
+            max_call_seconds=limit,
+            place_call=request.direction == "outbound",
+        )
+
+    return build
+
+
+def _daemon_transcript_factory(
+    config: Config,
+) -> Callable[[CallRequest, str], TranscriptLogger | None]:
+    """Open one transcript per daemon call with its direction and metadata."""
+
+    def build(request: CallRequest, call_id: str) -> TranscriptLogger | None:
+        return _open_transcript(
+            config,
+            call_id=call_id,
+            number=request.number,
+            direction=request.direction,
+            objective=request.objective,
+        )
+
+    return build
+
+
+class _ExecutorSession:
+    """Present one executor call as an inbound watcher session.
+
+    The watcher calls ``run()`` and ignores its return value. Polling the
+    handle instead of blocking forever lets a daemon stop cancel an inbound
+    call through the same executor ``hangup`` path as an outbound call.
+    """
+
+    def __init__(
+        self,
+        executor: CallExecutor,
+        handle: CallHandle,
+        stop_event: threading.Event,
+    ) -> None:
+        self._executor = executor
+        self._handle = handle
+        self._stop = stop_event
+
+    def run(self) -> Any:
+        while not self._handle.done.wait(0.1):
+            if self._stop.is_set():
+                self._executor.hangup()
+        if self._handle.error is not None:
+            raise self._handle.error
+        return self._handle.result
+
+
+def _executor_inbound_factory(
+    executor: CallExecutor,
+    config: Config,
+) -> Callable[[threading.Event], _ExecutorSession]:
+    """Submit an answered inbound call to the shared executor."""
+
+    def build(stop_event: threading.Event) -> _ExecutorSession:
+        if stop_event.is_set():
+            raise RuntimeError("daemon is stopping; not starting the inbound session")
+        request = CallRequest(
+            direction="inbound",
+            max_call_seconds=config.agent.max_call_seconds,
+        )
+        try:
+            handle = executor.enqueue(request)
+        except BusyError as exc:
+            raise RuntimeError(f"cannot start the inbound session: {exc}") from exc
+        return _ExecutorSession(executor, handle, stop_event)
+
+    return build
 
 
 def _cmd_inbound(args: argparse.Namespace) -> int:

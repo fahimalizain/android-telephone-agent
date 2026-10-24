@@ -32,6 +32,7 @@ __all__ = [
     "BrainConfig",
     "Config",
     "ConfigError",
+    "DaemonConfig",
     "DialerConfig",
     "InboundConfig",
     "RealtimeConfig",
@@ -45,6 +46,9 @@ __all__ = [
 _ENV_PREFIX = "TELEPHONE_AGENT_"
 _E164_PATTERN = re.compile(r"^\+[1-9]\d{6,14}$")
 _BLUETOOTH_ADDRESS = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+# Leave headroom below Linux's 108-byte sun_path limit so the resolved runtime
+# path still fits after expanding ~ and the default XDG_RUNTIME_DIR.
+_MAX_SOCKET_PATH_BYTES = 100
 
 _T = TypeVar("_T")
 
@@ -94,6 +98,20 @@ class InboundConfig:
 
     poll_interval_s: float = 1.0
     answer_delay_s: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class DaemonConfig:
+    """Settings for the local daemon control socket.
+
+    An empty ``socket`` selects ``$XDG_RUNTIME_DIR/telephone-agent.sock``, or a
+    per-user path under the system temporary directory when the runtime
+    directory is unset. The path is expanded with ``~`` at runtime. The daemon
+    owns the call engine; ``run`` submits outbound calls to it over this Unix
+    socket and the ``inbound`` watcher runs in the same process.
+    """
+
+    socket: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +242,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     inbound: InboundConfig = field(default_factory=InboundConfig)
+    daemon: DaemonConfig = field(default_factory=DaemonConfig)
     phone_number: str = field(default="", repr=False)
     transcript: TranscriptConfig = field(default_factory=TranscriptConfig)
 
@@ -279,6 +298,7 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
         "agent",
         "server",
         "inbound",
+        "daemon",
         "transcript",
     }
     unknown = sorted(set(data) - allowed)
@@ -286,7 +306,7 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
         raise ConfigError(
             "unknown top-level configuration key(s): "
             f"{', '.join(unknown)}; expected phone_number, audio, dialer, brain, "
-            "realtime, agent, server, inbound, transcript"
+            "realtime, agent, server, inbound, daemon, transcript"
         )
 
     config = Config(
@@ -298,6 +318,7 @@ def load(path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None) 
         agent=_build_section(AgentConfig, data.get("agent"), "agent"),
         server=_build_section(ServerConfig, data.get("server"), "server"),
         inbound=_build_section(InboundConfig, data.get("inbound"), "inbound"),
+        daemon=_build_section(DaemonConfig, data.get("daemon"), "daemon"),
         transcript=_build_section(TranscriptConfig, data.get("transcript"), "transcript"),
     )
     config = _apply_env(config, os.environ if env is None else env)
@@ -319,6 +340,7 @@ def validate(config: Config) -> None:
     _validate_agent(config.agent)
     _validate_server(config.server)
     _validate_inbound(config.inbound)
+    _validate_daemon(config.daemon)
     _validate_transcript(config.transcript)
     if config.phone_number:
         ensure_e164(config.phone_number)
@@ -548,6 +570,32 @@ def _validate_inbound(inbound: InboundConfig) -> None:
         )
 
 
+def _validate_daemon(daemon: DaemonConfig) -> None:
+    if not isinstance(daemon.socket, str):
+        raise ConfigError(f"daemon.socket must be a string (got {daemon.socket!r})")
+    if not daemon.socket:
+        return
+    if not daemon.socket.strip():
+        raise ConfigError("daemon.socket must not be empty or whitespace; omit it for the default")
+    try:
+        expanded = Path(daemon.socket).expanduser()
+    except (OSError, RuntimeError) as exc:
+        raise ConfigError(f"daemon.socket cannot be expanded: {exc}") from exc
+    encoded_length = len(os.fsencode(expanded))
+    if encoded_length > _MAX_SOCKET_PATH_BYTES:
+        raise ConfigError(
+            f"daemon.socket must be at most {_MAX_SOCKET_PATH_BYTES} bytes after "
+            f"expanding ~ (got {encoded_length}); Unix-domain socket paths are "
+            "limited to about 108 bytes on Linux"
+        )
+    parent = expanded.parent
+    if parent.exists() and not parent.is_dir():
+        raise ConfigError(
+            f"daemon.socket parent {parent} is not a directory; choose a path "
+            "under a writable directory, for example $XDG_RUNTIME_DIR/telephone-agent.sock"
+        )
+
+
 def _validate_transcript(transcript: TranscriptConfig) -> None:
     if not isinstance(transcript.enabled, bool):
         raise ConfigError(f"transcript.enabled must be a boolean (got {transcript.enabled!r})")
@@ -631,6 +679,7 @@ def _apply_env(config: Config, env: Mapping[str, str]) -> Config:
         "agent": AgentConfig,
         "server": ServerConfig,
         "inbound": InboundConfig,
+        "daemon": DaemonConfig,
         "transcript": TranscriptConfig,
     }
 

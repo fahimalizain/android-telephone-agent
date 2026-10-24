@@ -276,3 +276,60 @@ def test_duplicate_sessions_are_not_started_while_the_call_never_goes_idle() -> 
     assert dialer.answers == 1
     assert len(sessions) == 1
     assert time_source.sleeps
+
+
+def test_busy_executor_does_not_answer_the_ringing_call() -> None:
+    stop_event = threading.Event()
+    dialer = FakeDialer(["ringing"], stop_event)
+    sessions: list[FakeSession] = []
+
+    def factory() -> FakeSession:
+        session = FakeSession()
+        sessions.append(session)
+        return session
+
+    watcher = InboundWatcher(
+        dialer=dialer,
+        session_factory=factory,
+        stop_event=stop_event,
+        config=InboundConfig(poll_interval_s=1.0),
+        once=True,
+        can_accept=lambda: False,
+    )
+
+    assert watcher.run() == 0
+    assert dialer.answers == 0
+    assert sessions == []
+
+
+def test_can_accept_is_rechecked_after_the_answer_delay() -> None:
+    stop_event = threading.Event()
+    dialer = FakeDialer(["ringing", "ringing"], stop_event)
+    sessions: list[FakeSession] = []
+    checks = 0
+
+    def can_accept() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks == 1
+
+    def factory() -> FakeSession:
+        session = FakeSession()
+        sessions.append(session)
+        return session
+
+    time_source = FakeTime(stop_event)
+    watcher = InboundWatcher(
+        dialer=dialer,
+        session_factory=factory,
+        stop_event=stop_event,
+        config=InboundConfig(poll_interval_s=1.0, answer_delay_s=1.0),
+        clock=time_source.clock,
+        sleep=time_source.sleep,
+        can_accept=can_accept,
+    )
+
+    assert watcher.run() == 0
+    assert checks >= 2
+    assert dialer.answers == 0
+    assert sessions == []

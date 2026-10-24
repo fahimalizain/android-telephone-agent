@@ -39,6 +39,12 @@ _WAIT_SLICE_S = 0.25
 _MAX_BACKOFF_S = 30.0
 
 
+def _always_accept() -> bool:
+    """Default acceptance predicate: no competing call is active."""
+
+    return True
+
+
 class InboundDialer(Protocol):
     """The helper operations the watcher needs."""
 
@@ -70,6 +76,9 @@ class InboundWatcher:
         once: Handle at most one call, then return.
         poll_interval_s: Optional override for ``config.poll_interval_s``.
         answer_delay_s: Optional override for ``config.answer_delay_s``.
+        can_accept: Optional predicate checked before the answer request. When
+            it returns ``False`` the ringing call is left unanswered; this lets
+            the shared call executor finish an outbound call first.
     """
 
     def __init__(
@@ -84,6 +93,7 @@ class InboundWatcher:
         once: bool = False,
         poll_interval_s: float | None = None,
         answer_delay_s: float | None = None,
+        can_accept: Callable[[], bool] | None = None,
     ) -> None:
         self._dialer = dialer
         self._session_factory = session_factory
@@ -91,6 +101,7 @@ class InboundWatcher:
         self._clock = clock
         self._sleep = sleep
         self._once = once
+        self._can_accept = can_accept if can_accept is not None else _always_accept
 
         settings = config or InboundConfig()
         self._poll_interval = (
@@ -149,6 +160,10 @@ class InboundWatcher:
         manually, or could not be answered produces ``False`` and no session.
         """
 
+        if not self._can_accept():
+            logger.info("the call engine is busy; leaving the ringing call unanswered")
+            return False
+
         if self._answer_delay > 0:
             if not self._wait(self._answer_delay):
                 return False
@@ -162,6 +177,11 @@ class InboundWatcher:
             if phase != "ringing":
                 logger.info("call is no longer ringing (%s); not answering", phase)
                 return False
+
+        # An outbound call may have been accepted during the answer delay.
+        if not self._can_accept():
+            logger.info("the call engine became busy; not answering the ringing call")
+            return False
 
         try:
             self._dialer.answer()

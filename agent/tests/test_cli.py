@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import builtins
 import json
+import socket
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from telephone_agent.__main__ import (
     _audio_from_config,
     _build_session_factory,
     _check_pipewire_tools,
+    _cmd_daemon,
     _cmd_doctor,
     _cmd_inbound,
     _cmd_run,
@@ -40,6 +42,7 @@ from telephone_agent.config import (
     TranscriptConfig,
 )
 from telephone_agent.consult import ConsultationBroker
+from telephone_agent.daemon import CallReply
 from telephone_agent.pipeline import (
     AgentReply,
     CallEndReason,
@@ -736,7 +739,7 @@ directory = "{directory}"
 
     monkeypatch.setattr("telephone_agent.__main__._build_session", fake_build_session)
 
-    assert _cmd_run(argparse.Namespace(config=str(path), number=None)) == 0
+    assert _cmd_run(argparse.Namespace(config=str(path), number=None, direct=True)) == 0
 
     assert callable(captured["on_event"])
     paths = list(directory.glob("*.jsonl"))
@@ -1061,3 +1064,247 @@ def test_serve_stops_the_service_when_startup_fails() -> None:
         asyncio.run(_serve(service, []))  # type: ignore[arg-type]
 
     assert service.stop_calls == 1
+
+
+class _FakeDaemon:
+    """Accept one connection, record the request, and send one response."""
+
+    def __init__(self, path: Path, response: dict[str, object]) -> None:
+        self.path = path
+        self.response = response
+        self.requests: list[dict[str, object]] = []
+        self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._listener.bind(str(path))
+        self._listener.listen(1)
+        self._listener.settimeout(5.0)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def __enter__(self) -> _FakeDaemon:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self._listener.close()
+        self._thread.join(2.0)
+
+    def _serve(self) -> None:
+        try:
+            connection, _address = self._listener.accept()
+        except OSError:
+            return
+        with connection:
+            buffer = bytearray()
+            while b"\n" not in buffer:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    return
+                buffer.extend(chunk)
+            line, _, _rest = bytes(buffer).partition(b"\n")
+            self.requests.append(json.loads(line.decode("utf-8")))
+            connection.sendall(json.dumps(self.response).encode("utf-8") + b"\n")
+
+
+def _daemon_config(tmp_path: Path, socket_path: Path) -> Path:
+    return _write_config(
+        tmp_path,
+        f"""
+phone_number = "+15555550100"
+
+[audio]
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+
+[daemon]
+socket = "{socket_path}"
+""",
+    )
+
+
+def test_run_client_sends_a_call_to_the_daemon(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    socket_path = tmp_path / "daemon.sock"
+    path = _daemon_config(tmp_path, socket_path)
+    response = {
+        "ok": True,
+        "result": {
+            "state": "idle",
+            "reason": "completed",
+            "turns": 2,
+            "duration_s": 3.25,
+        },
+    }
+
+    with _FakeDaemon(socket_path, response) as fake:
+        assert _cmd_run(argparse.Namespace(config=str(path), number=None, direct=False)) == 0
+
+    assert fake.requests == [
+        {
+            "command": "call",
+            "number": "+15555550100",
+            "objective": "",
+            "max_call_seconds": 300,
+        }
+    ]
+    captured = capsys.readouterr()
+    assert "call ended: state=idle reason=completed turns=2 duration=3.2s" in captured.out
+    assert "+15555550100" not in captured.out + captured.err
+
+
+def test_run_client_reports_an_unavailable_daemon(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _daemon_config(tmp_path, tmp_path / "missing.sock")
+
+    assert _cmd_run(argparse.Namespace(config=str(path), number=None, direct=False)) == 1
+
+    captured = capsys.readouterr()
+    assert "telephone-agent-daemon.service" in captured.err
+    assert "--direct" in captured.err
+    assert "no daemon is listening" in captured.err
+
+
+def test_run_client_returns_1_after_an_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _daemon_config(tmp_path, tmp_path / "daemon.sock")
+
+    class FakeClient:
+        def __init__(self, _path: object) -> None:
+            pass
+
+        def call(self, *_args: object, **_kwargs: object) -> CallReply:
+            return CallReply(
+                {
+                    "ok": True,
+                    "result": {
+                        "state": "idle",
+                        "reason": "interrupted",
+                        "turns": 0,
+                        "duration_s": 0.4,
+                    },
+                },
+                interrupted=True,
+            )
+
+    monkeypatch.setattr("telephone_agent.__main__.DaemonClient", FakeClient)
+
+    assert _cmd_run(argparse.Namespace(config=str(path), number=None, direct=False)) == 1
+    assert "call ended: state=idle reason=interrupted" in capsys.readouterr().out
+
+
+def test_run_direct_flag_is_parsed(tmp_path: Path) -> None:
+    args = build_parser().parse_args(["--config", str(tmp_path / "config.toml"), "run", "--direct"])
+
+    assert args.command == "run"
+    assert args.direct is True
+    assert args.handler is _cmd_run
+
+
+def test_daemon_subcommand_parses_and_dispatches(tmp_path: Path) -> None:
+    args = build_parser().parse_args(["--config", str(tmp_path / "config.toml"), "daemon"])
+
+    assert args.command == "daemon"
+    assert args.config == str(tmp_path / "config.toml")
+    assert args.handler is _cmd_daemon
+
+
+def test_daemon_requires_the_grok_realtime_adapter(tmp_path: Path) -> None:
+    path = _daemon_config(tmp_path, tmp_path / "daemon.sock")
+
+    with pytest.raises(ConfigError, match="daemon requires realtime.kind = 'grok'"):
+        _cmd_daemon(argparse.Namespace(config=str(path)))
+
+
+def test_daemon_starts_the_executor_server_and_watcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_config(
+        tmp_path,
+        """
+[audio]
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+
+[realtime]
+kind = "grok"
+
+[daemon]
+socket = "/tmp/test-telephone-agent.sock"
+""",
+    )
+    calls: dict[str, object] = {}
+
+    class FakeExecutor:
+        def __init__(self, **kwargs: object) -> None:
+            calls["executor_kwargs"] = kwargs
+            self.busy = False
+
+        def start(self) -> None:
+            calls["executor_started"] = True
+
+        def stop(self) -> None:
+            calls["executor_stopped"] = True
+
+        def hangup(self) -> bool:
+            calls["hungup"] = True
+            return True
+
+        def enqueue(self, _request: object) -> object:
+            raise AssertionError("the watcher factory must not run without a call")
+
+    class FakeServer:
+        def __init__(self, socket_path: object, _executor: object) -> None:
+            self.path = socket_path
+
+        def start(self) -> None:
+            calls["server_started"] = True
+
+        def stop(self) -> None:
+            calls["server_stopped"] = True
+
+    class FakeWatcher:
+        def __init__(self, **kwargs: object) -> None:
+            calls.update(kwargs)
+
+        def run(self) -> int:
+            calls["watcher_ran"] = True
+            return 3
+
+    monkeypatch.setattr("telephone_agent.__main__.CallExecutor", FakeExecutor)
+    monkeypatch.setattr("telephone_agent.__main__.ControlServer", FakeServer)
+    monkeypatch.setattr("telephone_agent.__main__.InboundWatcher", FakeWatcher)
+    monkeypatch.setattr("telephone_agent.__main__._install_stop_handlers", lambda _event: {})
+    monkeypatch.setattr(
+        "telephone_agent.__main__._restore_signal_handlers",
+        lambda _previous: calls.setdefault("handlers_restored", True),
+    )
+
+    assert _cmd_daemon(argparse.Namespace(config=str(path))) == 0
+
+    assert calls["executor_started"] is True
+    assert calls["server_started"] is True
+    assert calls["watcher_ran"] is True
+    assert calls["server_stopped"] is True
+    assert calls["executor_stopped"] is True
+    assert calls["hungup"] is True
+    assert calls["handlers_restored"] is True
+    assert callable(calls["can_accept"])
+    assert callable(calls["session_factory"])
+    assert isinstance(calls["stop_event"], threading.Event)
+    output = capsys.readouterr().out
+    assert "socket: /tmp/test-telephone-agent.sock" in output
+    assert "serving inbound and outbound calls" in output
+    assert "daemon stopped after 3 inbound call(s)" in output

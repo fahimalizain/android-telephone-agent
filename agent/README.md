@@ -151,6 +151,7 @@ actionable message.
 | `dialer` | `retries` | `2` | Retries for 5xx and connection failures only, 0-5. 4xx is never retried. |
 | `inbound` | `poll_interval_s` | `1.0` | Seconds between helper `/state` polls for the `inbound` command, 0.2-30. |
 | `inbound` | `answer_delay_s` | `0.0` | Grace period after a `ringing` state before asking the helper to answer, 0-30. The state is re-checked first. |
+| `daemon` | `socket` | empty | Local Unix-domain control socket for the long-lived `daemon` command. Empty selects `$XDG_RUNTIME_DIR/telephone-agent.sock`, falling back to a per-user path under the system temporary directory. |
 | `brain` | `kind` | `echo` | `echo` or `http`. |
 | `brain` | `base_url` | empty | Required for `http`; API root up to `/v1`. |
 | `brain` | `api_key` | empty | Optional for local OpenAI-compatible servers. |
@@ -256,12 +257,19 @@ that. This is useful for testing call control without the conversation loop.
 telephone-agent --config ../config/config.toml run --number +15555550100
 ```
 
-Places one call, captures audio, runs the energy VAD, sends detected utterances
-to the brain, and hangs up at the silence limit, the call limit, an audio
-failure, or when interrupted with Ctrl-C. The process is one-shot; scheduling is
-external.
+By default this submits one outbound call to the long-lived `daemon` process over
+its local Unix socket and waits for the final result, printing the same
+`call ended: state=... reason=... turns=... duration=...` line as an in-process
+run. The daemon owns the audio path, so `run` and the daemon's inbound watcher
+cannot open a call at the same time. If no daemon is listening the command exits
+with status 1 and tells you to start `telephone-agent-daemon.service` or use
+`--direct`; it does not silently fall back to a second audio owner.
 
-In v0 this command runs in **scaffold mode** unless you add speech adapters or
+`--direct` runs the call in this process instead, exactly as the pre-daemon
+runtime did. Use it for debugging when the daemon is stopped. Ctrl-C asks the
+daemon to hang up on a separate connection and prints the interrupted result.
+
+In v0 the direct path runs in **scaffold mode** unless you add speech adapters or
 set `realtime.kind = "grok"`. In scaffold mode it detects utterances, sends a
 clearly marked placeholder transcript to the brain, and logs the reply instead
 of speaking it. `EchoBrain` is the default, so a complete run demonstrates call
@@ -271,12 +279,34 @@ See the next section to make it audible.
 The exit status is 0 for a completed call, 1 for a failed call or an interrupt,
 and 2 for a configuration error.
 
+### `daemon`
+
+```bash
+telephone-agent --config ../config/config.toml daemon
+```
+
+Runs one long-lived process that owns the call engine and handles both inbound
+and outbound calls. Outbound calls arrive from `run` over the Unix socket in
+`[daemon].socket`; the inbound watcher runs in the same process and submits each
+answered call to the same single-call executor. This requires
+`realtime.kind = "grok"`; the text pipeline has no inbound audio path. The
+command prints the socket path, then `serving inbound and outbound calls`, and
+shuts down on SIGTERM or SIGINT by cancelling the active call and removing the
+socket. It refuses to start if another daemon is already listening.
+
+The control protocol is newline-delimited JSON with `call`, `status`, and
+`hangup` commands. It never carries the helper token or an API key, and status
+output masks the destination number.
+
 ### `inbound`
 
 ```bash
 telephone-agent --config ../config/config.toml inbound
 telephone-agent --config ../config/config.toml inbound --once
 ```
+
+This remains an inbound-only foreground debug command. The `daemon` command runs
+the same watcher alongside the outbound control socket.
 
 Polls the helper's `GET /state` endpoint every `inbound.poll_interval_s` and
 answers every `ringing` call with `POST /answer`. After a successful answer it

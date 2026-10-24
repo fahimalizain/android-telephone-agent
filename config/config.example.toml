@@ -57,6 +57,16 @@ poll_interval_s = 1.0
 # stopped ringing or was answered manually. Zero answers as soon as possible.
 answer_delay_s = 0.0
 
+[daemon]
+# Local Unix-domain control socket owned by the long-lived `daemon` command.
+# `run` submits outbound calls here by default; `run --direct` bypasses it and
+# runs the call in the foreground. Leave empty for
+# $XDG_RUNTIME_DIR/telephone-agent.sock, or a per-user path under the system
+# temporary directory when XDG_RUNTIME_DIR is unset. The parent directory is
+# created with mode 0700 when missing and the socket is mode 0600. Override with
+# TELEPHONE_AGENT_DAEMON__SOCKET.
+socket = ""
+
 [brain]
 # "echo" returns a short echo and is intended for loopback testing.
 # "http" targets any OpenAI-compatible /chat/completions endpoint.

@@ -11,6 +11,7 @@ from telephone_agent.config import (
     BrainConfig,
     Config,
     ConfigError,
+    DaemonConfig,
     DialerConfig,
     InboundConfig,
     RealtimeConfig,
@@ -67,6 +68,8 @@ def test_load_applies_defaults(tmp_path: Path) -> None:
     assert config.inbound == InboundConfig()
     assert config.inbound.poll_interval_s == 1.0
     assert config.inbound.answer_delay_s == 0.0
+    assert config.daemon == DaemonConfig()
+    assert config.daemon.socket == ""
     assert config.transcript == TranscriptConfig()
     assert config.transcript.enabled is False
     assert config.transcript.directory == "runtime/transcripts"
@@ -932,4 +935,63 @@ def test_transcript_validation(
     path = _write(tmp_path, f"{BASE_CONFIG}\n{transcript_block}\n")
 
     with pytest.raises(ConfigError, match=message):
+        load(path, env={})
+
+
+def test_load_reads_daemon_socket(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        BASE_CONFIG
+        + """
+[daemon]
+socket = "/run/user/1000/telephone-agent.sock"
+""",
+    )
+
+    config = load(path, env={})
+
+    assert config.daemon.socket == "/run/user/1000/telephone-agent.sock"
+
+
+def test_environment_overrides_daemon_socket(tmp_path: Path) -> None:
+    env = {"TELEPHONE_AGENT_DAEMON__SOCKET": "/tmp/telephone-agent-test.sock"}
+
+    config = load(_write(tmp_path), env=env)
+
+    assert config.daemon.socket == "/tmp/telephone-agent-test.sock"
+
+
+def test_daemon_socket_rejects_a_too_long_path(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        BASE_CONFIG + f'\n[daemon]\nsocket = "/tmp/{"a" * 120}.sock"\n',
+    )
+
+    with pytest.raises(ConfigError, match="daemon.socket must be at most"):
+        load(path, env={})
+
+
+def test_daemon_socket_rejects_a_parent_that_is_a_file(tmp_path: Path) -> None:
+    parent = tmp_path / "not-a-directory"
+    parent.write_text("file", encoding="utf-8")
+    path = _write(
+        tmp_path,
+        BASE_CONFIG + f'\n[daemon]\nsocket = "{parent / "agent.sock"}"\n',
+    )
+
+    with pytest.raises(ConfigError, match="is not a directory"):
+        load(path, env={})
+
+
+def test_daemon_socket_rejects_whitespace(tmp_path: Path) -> None:
+    path = _write(tmp_path, BASE_CONFIG + '\n[daemon]\nsocket = "   "\n')
+
+    with pytest.raises(ConfigError, match="daemon.socket must not be empty"):
+        load(path, env={})
+
+
+def test_unknown_daemon_key_is_rejected(tmp_path: Path) -> None:
+    path = _write(tmp_path, BASE_CONFIG + "\n[daemon]\nport = 9000\n")
+
+    with pytest.raises(ConfigError, match="unknown key\\(s\\) in \\[daemon\\]"):
         load(path, env={})
