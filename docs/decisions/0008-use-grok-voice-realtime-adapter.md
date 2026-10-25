@@ -34,9 +34,10 @@ Add the realtime session beside the existing pipeline as an independent adapter,
 The adapter streams the call downlink as binary PCM16 at `audio.sample_rate`,
 plays the returned PCM through a streaming PipeWire sink, stops playback
 on `input_audio_buffer.speech_started`, and exposes `end_call` and, on delegated
-calls, `consult` as function tools. The API key comes from `XAI_API_KEY` or a
-`TELEPHONE_AGENT_REALTIME__API_KEY` override; the optional TOML field exists for
-compatibility but should stay empty in a committed file.
+calls, `consult` as function tools. The credential comes from
+`realtime.api_key_command` (recommended, run once per call), then `XAI_API_KEY`,
+or the corresponding `TELEPHONE_AGENT_REALTIME__*` overrides; the literal TOML
+field exists for compatibility but should stay empty in a committed file.
 
 ## Consequences
 

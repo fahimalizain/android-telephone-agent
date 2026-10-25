@@ -208,6 +208,8 @@ vad_threshold = 0.6
 prefix_padding_ms = 250
 silence_duration_ms = 400
 idle_timeout_ms = 15000
+api_key_command = "/home/test/bin/xai-token --key"
+api_key_command_timeout_s = 2.5
 """,
     )
 
@@ -221,6 +223,8 @@ idle_timeout_ms = 15000
     assert config.realtime.reasoning_effort == "high"
     assert config.realtime.vad_threshold == 0.6
     assert config.realtime.idle_timeout_ms == 15000
+    assert config.realtime.api_key_command == "/home/test/bin/xai-token --key"
+    assert config.realtime.api_key_command_timeout_s == 2.5
 
 
 def test_environment_overrides_realtime(tmp_path: Path) -> None:
@@ -238,6 +242,22 @@ def test_environment_overrides_realtime(tmp_path: Path) -> None:
     assert "env-key" not in repr(config)
 
 
+def test_environment_overrides_realtime_command(tmp_path: Path) -> None:
+    env = {
+        "TELEPHONE_AGENT_REALTIME__KIND": "grok",
+        "TELEPHONE_AGENT_REALTIME__MODEL": "grok-voice-latest",
+        "TELEPHONE_AGENT_REALTIME__VOICE": "eve",
+        "TELEPHONE_AGENT_REALTIME__API_KEY_COMMAND": "/bin/echo test-key",
+        "TELEPHONE_AGENT_REALTIME__API_KEY_COMMAND_TIMEOUT_S": "2.5",
+    }
+
+    config = load(_write(tmp_path), env=env)
+
+    assert config.realtime.api_key == ""
+    assert config.realtime.api_key_command == "/bin/echo test-key"
+    assert config.realtime.api_key_command_timeout_s == 2.5
+
+
 @pytest.mark.parametrize(
     "realtime_block, message",
     [
@@ -252,6 +272,19 @@ def test_environment_overrides_realtime(tmp_path: Path) -> None:
         ('[realtime]\nkind = "grok"\nidle_timeout_ms = -1', "idle_timeout_ms"),
         ('[realtime]\nkind = "grok"\ngreeting = "line\\nbreak"', "control characters"),
         ('[realtime]\nkind = "grok"\ngreeting = "' + "x" * 301 + '"', "at most 300"),
+        (
+            '[realtime]\nkind = "grok"\napi_key = "literal"\napi_key_command = "/bin/echo key"',
+            "mutually exclusive",
+        ),
+        (
+            '[realtime]\nkind = "grok"\napi_key_command = "/bin/echo key"\n'
+            "api_key_command_timeout_s = 0",
+            "api_key_command_timeout_s",
+        ),
+        (
+            '[realtime]\nkind = "grok"\napi_key_command = "echo \'unterminated"',
+            "valid command line",
+        ),
     ],
 )
 def test_realtime_validation(

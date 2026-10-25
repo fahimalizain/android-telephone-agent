@@ -972,6 +972,84 @@ kind = "grok"
     assert "doctor: ok" in captured.out
 
 
+def test_doctor_realtime_reports_command_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_config(
+        tmp_path,
+        """
+[audio]
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+
+[realtime]
+kind = "grok"
+api_key_command = "/bin/echo test-key"
+""",
+    )
+    monkeypatch.setattr("telephone_agent.__main__._check_pipewire_tools", lambda: True)
+    monkeypatch.setattr(
+        "telephone_agent.__main__.PipeWireAudio.find_sco_nodes",
+        lambda *_args, **_kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        "telephone_agent.__main__._dialer_from_config",
+        lambda _config: FakeDialer(),
+    )
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+
+    assert _cmd_doctor(argparse.Namespace(config=str(path))) == 0
+
+    captured = capsys.readouterr()
+    assert "api key: configured (realtime.api_key_command)" in captured.out
+    assert "test-key" not in captured.out
+    assert "doctor: ok" in captured.out
+
+
+def test_doctor_realtime_reports_command_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_config(
+        tmp_path,
+        """
+[audio]
+bluetooth_address = "AA:BB:CC:DD:EE:FF"
+
+[dialer]
+url = "http://127.0.0.1:8765"
+token = "test-token"
+
+[realtime]
+kind = "grok"
+api_key_command = "/bin/false"
+""",
+    )
+    monkeypatch.setattr("telephone_agent.__main__._check_pipewire_tools", lambda: True)
+    monkeypatch.setattr(
+        "telephone_agent.__main__.PipeWireAudio.find_sco_nodes",
+        lambda *_args, **_kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        "telephone_agent.__main__._dialer_from_config",
+        lambda _config: FakeDialer(),
+    )
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+
+    assert _cmd_doctor(argparse.Namespace(config=str(path))) == 1
+
+    captured = capsys.readouterr()
+    assert "api key: FAIL" in captured.err
+    assert "status 1" in captured.err
+    assert "doctor: FAIL" in captured.out
+
+
 def test_serve_stops_every_listener_when_the_first_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -95,7 +95,8 @@ helper independently rejects `/call` with `409` while a call is ringing or activ
   PipeWire and WirePlumber in the **same user session** as the agent, the host in
   the Hands-Free role, and Phone A set to **Calls and audio**. See
   [Bluetooth HFP](bluetooth-hfp.md).
-- An `XAI_API_KEY` in the service environment or `[realtime].api_key`.
+- A credential from `[realtime].api_key_command`, `XAI_API_KEY`, or
+  `[realtime].api_key`.
 
 ## Configuration
 
@@ -113,6 +114,8 @@ kind = "grok"
 model = "grok-voice-latest"
 voice = "eve"
 greeting = "Hello, this is the telephone agent. How can I help?"
+# Preferred: fetch the token at call time so it can rotate.
+# api_key_command = "/home/you/bin/xai-token"
 ```
 
 The same values can be overridden with

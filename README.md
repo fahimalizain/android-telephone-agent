@@ -67,7 +67,8 @@ The full setup is in the [Bluetooth HFP guide](docs/bluetooth-hfp.md) and
 
 3. **Configure the agent.** Copy the example, fill in the phone's Bluetooth address, the
    helper URL, and the same helper token, then lock the file down. For Grok Voice, set
-   `[realtime].api_key` or export `XAI_API_KEY` instead of storing the key in the file.
+   `[realtime].api_key_command` to a helper that prints the key, or export `XAI_API_KEY`,
+   instead of storing the key in the file.
 
    ```bash
    cp config/config.example.toml config/config.toml

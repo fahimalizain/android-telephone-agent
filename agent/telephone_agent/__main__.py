@@ -42,6 +42,7 @@ from .dialer import Dialer, DialerError, mask_number
 from .grok_realtime import (
     GrokRealtimeError,
     GrokRealtimeSession,
+    api_key_source,
     resolve_api_key,
 )
 from .inbound import InboundWatcher
@@ -284,14 +285,22 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         print(f"  model: {config.realtime.model}")
         print(f"  voice: {config.realtime.voice}")
         print(f"  url: {config.realtime.base_url}")
-        if resolve_api_key(config.realtime):
-            print("  api key: configured")
-        else:
-            print(
-                "  api key: FAIL: set XAI_API_KEY or TELEPHONE_AGENT_REALTIME__API_KEY",
-                file=sys.stderr,
-            )
+        try:
+            api_key = resolve_api_key(config.realtime)
+        except GrokRealtimeError as exc:
+            print(f"  api key: FAIL: {exc}", file=sys.stderr)
             failed = True
+        else:
+            if api_key:
+                source = api_key_source(config.realtime)
+                print(f"  api key: configured ({source})")
+            else:
+                print(
+                    "  api key: FAIL: set realtime.api_key_command, "
+                    "XAI_API_KEY, or TELEPHONE_AGENT_REALTIME__API_KEY",
+                    file=sys.stderr,
+                )
+                failed = True
         if importlib.util.find_spec("websockets") is None:
             print(
                 "  dependency: FAIL: websockets is not installed; run "

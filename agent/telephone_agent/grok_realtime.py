@@ -21,8 +21,10 @@ which is one of the rates the API accepts. Server-side VAD supplies endpointing
 and barge-in. The adapter stops local playback on
 ``input_audio_buffer.speech_started`` and drops the cancelled response's audio.
 
-The API key is read from ``realtime.api_key`` or, preferably, the
-``XAI_API_KEY`` environment variable. It is never logged or returned.
+The API key is read from ``realtime.api_key``, a command configured in
+``realtime.api_key_command``, or the ``XAI_API_KEY`` environment variable. A
+command runs once per call so a credential helper can follow token rotation. The
+key is never logged or exposed in status output.
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ import logging
 import math
 import os
 import queue
+import shlex
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -62,6 +66,7 @@ __all__ = [
     "DEFAULT_INSTRUCTIONS",
     "GrokRealtimeError",
     "GrokRealtimeSession",
+    "api_key_source",
     "build_session_update",
     "resolve_api_key",
 ]
@@ -81,23 +86,116 @@ _USER_AGENT = "telephone-agent/0.1"
 _SESSION_READY_TIMEOUT_S = 15.0
 _PLAYBACK_QUEUE_CHUNKS = 100
 _OUTBOUND_QUEUE_MESSAGES = 256
+_MAX_API_KEY_BYTES = 8192
 
 
 class GrokRealtimeError(RuntimeError):
     """Raised when the realtime session cannot be configured or used."""
 
 
-def resolve_api_key(config: RealtimeConfig, env: Mapping[str, str] | None = None) -> str:
-    """Return the xAI key from config or ``XAI_API_KEY``.
+def api_key_source(config: RealtimeConfig) -> str:
+    """Return the credential source name without resolving the key."""
 
-    The config value wins so an operator can use a dedicated environment
-    override. A blank value is never treated as configured.
+    if config.api_key.strip():
+        return "realtime.api_key"
+    if config.api_key_command.strip():
+        return "realtime.api_key_command"
+    return "XAI_API_KEY"
+
+
+def resolve_api_key(
+    config: RealtimeConfig,
+    env: Mapping[str, str] | None = None,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
+) -> str:
+    """Return the xAI key from config, ``api_key_command``, or ``XAI_API_KEY``.
+
+    The literal config value wins, then the command, then the environment. A
+    blank value is never treated as configured. The command runs once per call
+    so a credential helper can follow token rotation; ``runner`` is injectable
+    for tests.
     """
 
     if config.api_key.strip():
         return config.api_key.strip()
+    if config.api_key_command.strip():
+        return _run_api_key_command(config, env=env, runner=runner)
     source = os.environ if env is None else env
     return source.get("XAI_API_KEY", "").strip()
+
+
+def _run_api_key_command(
+    config: RealtimeConfig,
+    *,
+    env: Mapping[str, str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
+) -> str:
+    """Run ``realtime.api_key_command`` and return its single stdout line.
+
+    The command is executed directly, without a shell, so pipes and redirects
+    belong in the helper script. Its stderr and stdout are never included in
+    errors or logs because either may contain token material.
+    """
+
+    try:
+        argv = shlex.split(config.api_key_command)
+    except ValueError as exc:
+        raise GrokRealtimeError("realtime.api_key_command is not a valid command line") from exc
+    if not argv:
+        raise GrokRealtimeError("realtime.api_key_command is empty")
+
+    run = runner or subprocess.run
+    try:
+        completed = run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=config.api_key_command_timeout_s,
+            env=dict(os.environ if env is None else env),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GrokRealtimeError(
+            f"realtime.api_key_command timed out after {config.api_key_command_timeout_s:g} seconds"
+        ) from exc
+    except FileNotFoundError as exc:
+        raise GrokRealtimeError(
+            f"realtime.api_key_command executable not found: {argv[0]}"
+        ) from exc
+    except PermissionError as exc:
+        raise GrokRealtimeError(f"realtime.api_key_command is not executable: {argv[0]}") from exc
+    except OSError as exc:
+        raise GrokRealtimeError(
+            f"realtime.api_key_command could not run: {type(exc).__name__}"
+        ) from exc
+
+    if completed.returncode != 0:
+        raise GrokRealtimeError(
+            f"realtime.api_key_command exited with status {completed.returncode}; "
+            "run it manually to see its stderr"
+        )
+
+    raw = completed.stdout
+    if raw is None:
+        raise GrokRealtimeError("realtime.api_key_command produced no output")
+    if isinstance(raw, str):
+        text = raw
+    else:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise GrokRealtimeError("realtime.api_key_command output is not valid UTF-8") from exc
+
+    token = text.strip()
+    if not token:
+        raise GrokRealtimeError("realtime.api_key_command produced no output")
+    if "\n" in token or "\r" in token:
+        raise GrokRealtimeError("realtime.api_key_command must print exactly one token line")
+    if len(token.encode("utf-8")) > _MAX_API_KEY_BYTES:
+        raise GrokRealtimeError("realtime.api_key_command output is too large")
+    return token
 
 
 def build_session_update(
@@ -627,8 +725,8 @@ class GrokRealtimeSession:
         self._ran = True
         if not self._api_key:
             raise GrokRealtimeError(
-                "XAI_API_KEY is not set; export it or put it in the service's "
-                "EnvironmentFile outside the repository"
+                "no xAI credential is configured; set realtime.api_key_command "
+                "(recommended), realtime.api_key, or XAI_API_KEY"
             )
 
         started = self._clock()

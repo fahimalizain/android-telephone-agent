@@ -163,7 +163,9 @@ actionable message.
 | `brain` | `action_mode` | `text` | `text` wraps the normal reply brain and never consults. `json` requires `kind = "http"` and asks the model for one JSON action per turn. |
 | `realtime` | `kind` | `off` | `off` keeps the text pipeline. `grok` selects the full-duplex Grok Voice speech-to-speech adapter and bypasses `[brain]`, `Transcriber`, and `Synthesizer` at runtime. |
 | `realtime` | `base_url` | `wss://api.x.ai/v1/realtime` | WebSocket endpoint without the model query parameter. |
-| `realtime` | `api_key` | empty | Optional xAI key. Prefer `XAI_API_KEY` or a service `EnvironmentFile` outside the repository. |
+| `realtime` | `api_key` | empty | Optional xAI key. Mutually exclusive with `api_key_command`; prefer the command or `XAI_API_KEY`. |
+| `realtime` | `api_key_command` | empty | Optional command that prints the xAI token on stdout. Runs once per call without a shell, so the credential can rotate without a restart. Mutually exclusive with `api_key`. |
+| `realtime` | `api_key_command_timeout_s` | `5.0` | Timeout for `api_key_command`. |
 | `realtime` | `model` | `grok-voice-latest` | Realtime model; pin a version such as `grok-voice-3.0` for reproducibility. |
 | `realtime` | `voice` | `eve` | Built-in voice id or a custom xAI voice id. |
 | `realtime` | `instructions` | built-in prompt | Optional system prompt. Empty uses the concise telephone prompt. |
@@ -526,21 +528,29 @@ voice = "eve"
 # Optional: spoken once after the call audio is ready. Empty waits for the
 # callee to speak first.
 greeting = "Hello, this is the telephone agent calling about your appointment."
-# Optional: prefer XAI_API_KEY in the service environment instead.
+# Recommended: fetch the token at call time so it can rotate.
+api_key_command = "/home/you/bin/xai-token"
+# api_key_command_timeout_s = 5.0
+# Optional literal fallback; mutually exclusive with api_key_command.
 # api_key = ""
 ```
 
-Install the optional client and export the key outside the repository:
+Install the optional client and expose a credential helper:
 
 ```bash
 cd agent
 pip install -e ".[realtime]"
-export XAI_API_KEY='...'   # or use systemd EnvironmentFile=
+export TELEPHONE_AGENT_REALTIME__API_KEY_COMMAND="$HOME/bin/xai-token"
+# or: export XAI_API_KEY='...'
 ```
 
-The key is never logged. The example configuration leaves `api_key` empty; prefer
-`XAI_API_KEY` or a systemd `EnvironmentFile` outside the repository. `doctor`
-reports whether a key is configured without printing it:
+The key is never logged. The adapter resolves it once per call from
+`realtime.api_key`, then `realtime.api_key_command`, then `XAI_API_KEY`;
+`api_key` and the command are mutually exclusive. The command runs without a
+shell, so use an executable plus arguments and keep pipes and redirects inside
+the helper. It must print exactly one token on stdout; its stderr and stdout are
+never included in errors. `doctor` runs the command and reports whether a key
+resolved, without printing it:
 
 ```bash
 telephone-agent --config ../config/config.toml doctor

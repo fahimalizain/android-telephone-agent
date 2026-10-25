@@ -60,6 +60,10 @@ The project is at alpha; minor versions may change APIs and file layout.
 - Opt-in local call transcripts: `[transcript]` writes one timestamped JSONL file per
   call with full conversation detail, mode `0600` in a `0700` directory under
   `runtime/transcripts` by default. Audio is not persisted.
+- `[realtime].api_key_command` and `api_key_command_timeout_s`: resolve the Grok Voice
+  credential by running a helper once per call, so short-lived OAuth tokens can rotate
+  without restarting the daemon. The command runs without a shell, prints one token on
+  stdout, and is mutually exclusive with a literal `[realtime].api_key`.
 
 ### Changed
 

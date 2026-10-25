@@ -48,6 +48,9 @@ and provider credentials, and control of the phone's dialer. The main threats ar
   tokens, and Wi-Fi credentials must never be committed. `config/config.example.toml`
   and `.env.example` contain placeholders only. If you commit a secret by accident,
   rotate it immediately; removing it from a later commit does not remove it from history.
+- **Credential commands are code execution.** `[realtime].api_key_command` runs a
+  trusted command from the configuration as the daemon user. Keep `config.toml` at
+  mode `0600`, and never point the command at a path that another user can modify.
 - **Call audio leaves the LAN.** Audio and transcripts are sent to third-party
   speech-to-text and text-to-speech providers, and the LLM provider sees transcripts and
   call context. Those providers can observe the conversation subject to their own
@@ -85,6 +88,8 @@ The following are generally out of scope for this policy:
 
 - Keep the helper endpoint on a private interface and require its bearer token.
 - Rotate the helper token and provider keys after any suspected exposure.
+- Keep `config.toml` and credential helpers writable only by the daemon user; a
+  credential command is trusted code.
 - Keep the phone and host patched, and review the helper app's permissions.
 - Monitor heartbeat alerts for unexpected calls or failed calls.
 - Do not record calls unless you have the consent required in your jurisdiction.

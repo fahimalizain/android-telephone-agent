@@ -363,7 +363,8 @@ Expect `active (running)`, no `daemon requires realtime.kind = 'grok'` error, an
 `{"state":"..."}` response. A call should move from `ringing` to `offhook` within about one
 poll interval after the daemon answers. For a supervised check, call the agent SIM from
 another handset and watch `/state` and the journal through answer, greeting, and hangup.
-Confirm `[realtime].kind = "grok"` and that the service environment has `XAI_API_KEY`.
+Confirm `[realtime].kind = "grok"` and that the service can resolve a credential
+(`[realtime].api_key_command`, `XAI_API_KEY`, or `[realtime].api_key`).
 
 **Fix.** Start the daemon with
 `systemctl --user start telephone-agent-daemon.service`. Use `restart` only when no call is

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import subprocess
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -16,6 +17,7 @@ from telephone_agent.consult import Consultation, ConsultationOutcome
 from telephone_agent.grok_realtime import (
     GrokRealtimeError,
     GrokRealtimeSession,
+    api_key_source,
     build_session_update,
     resolve_api_key,
 )
@@ -148,6 +150,30 @@ class FakeBroker:
             answer=self.answer,
             timed_out=self.answer is None,
         )
+
+
+class FakeRunner:
+    """Record a credential command invocation and return a canned result."""
+
+    def __init__(
+        self,
+        *,
+        returncode: int = 0,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        error: BaseException | None = None,
+    ) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.error = error
+        self.calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        self.calls.append((argv, kwargs))
+        if self.error is not None:
+            raise self.error
+        return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
 
 
 def _config(**overrides: Any) -> RealtimeConfig:
@@ -573,6 +599,116 @@ def test_resolve_api_key_prefers_config_then_environment() -> None:
     )
     assert resolve_api_key(_config(api_key=""), {"XAI_API_KEY": "env-key"}) == "env-key"
     assert resolve_api_key(_config(api_key="  "), {}) == ""
+
+
+def test_api_key_source_prefers_literal_then_command() -> None:
+    assert (
+        api_key_source(_config(api_key="config-key", api_key_command="/bin/fake"))
+        == "realtime.api_key"
+    )
+    assert api_key_source(_config(api_key="", api_key_command="/bin/fake")) == (
+        "realtime.api_key_command"
+    )
+    assert api_key_source(_config(api_key="", api_key_command="  ")) == "XAI_API_KEY"
+
+
+def test_resolve_api_key_runs_command_before_environment() -> None:
+    runner = FakeRunner(stdout=b"command-key\n")
+
+    key = resolve_api_key(
+        _config(api_key="", api_key_command="/bin/fake --flag"),
+        {"XAI_API_KEY": "env-key"},
+        runner=runner,
+    )
+
+    assert key == "command-key"
+    argv, kwargs = runner.calls[0]
+    assert argv == ["/bin/fake", "--flag"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.PIPE
+    assert kwargs["stderr"] is subprocess.PIPE
+    assert kwargs["timeout"] == 5.0
+    assert kwargs["env"] == {"XAI_API_KEY": "env-key"}
+    assert kwargs["check"] is False
+
+
+def test_resolve_api_key_literal_wins_without_running_command() -> None:
+    runner = FakeRunner(stdout=b"command-key")
+
+    key = resolve_api_key(
+        _config(api_key="config-key", api_key_command="/bin/fake"),
+        {},
+        runner=runner,
+    )
+
+    assert key == "config-key"
+    assert runner.calls == []
+
+
+def test_resolve_api_key_command_is_not_run_through_a_shell() -> None:
+    runner = FakeRunner(stdout=b"key")
+
+    assert (
+        resolve_api_key(
+            _config(api_key="", api_key_command="echo key; false"),
+            {},
+            runner=runner,
+        )
+        == "key"
+    )
+    assert runner.calls[0][0] == ["echo", "key;", "false"]
+
+
+def test_resolve_api_key_command_strips_surrounding_whitespace() -> None:
+    runner = FakeRunner(stdout=b"  key  \n")
+
+    assert (
+        resolve_api_key(
+            _config(api_key="", api_key_command="/bin/fake"),
+            {},
+            runner=runner,
+        )
+        == "key"
+    )
+
+
+@pytest.mark.parametrize(
+    "runner, message",
+    [
+        (FakeRunner(returncode=7), "status 7"),
+        (FakeRunner(stdout=b""), "no output"),
+        (FakeRunner(stdout=b"line1\nline2\n"), "exactly one token line"),
+        (FakeRunner(stdout=b"\xff"), "not valid UTF-8"),
+        (FakeRunner(stdout=b"x" * 8193), "too large"),
+        (FakeRunner(error=subprocess.TimeoutExpired(["fake"], 5.0)), "timed out"),
+        (FakeRunner(error=FileNotFoundError()), "executable not found"),
+        (FakeRunner(error=PermissionError()), "not executable"),
+        (FakeRunner(error=OSError()), "could not run: OSError"),
+    ],
+)
+def test_resolve_api_key_command_failures(
+    runner: FakeRunner,
+    message: str,
+) -> None:
+    with pytest.raises(GrokRealtimeError, match=message):
+        resolve_api_key(
+            _config(api_key="", api_key_command="/bin/fake"),
+            {},
+            runner=runner,
+        )
+
+
+def test_resolve_api_key_command_error_does_not_include_output() -> None:
+    runner = FakeRunner(returncode=1, stdout=b"secret-token", stderr=b"secret-token")
+
+    with pytest.raises(GrokRealtimeError) as excinfo:
+        resolve_api_key(
+            _config(api_key="", api_key_command="/bin/fake"),
+            {},
+            runner=runner,
+        )
+
+    assert "secret-token" not in str(excinfo.value)
 
 
 def test_session_update_rejects_non_grok_config() -> None:

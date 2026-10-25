@@ -98,10 +98,15 @@ kind = "off"
 # ?model=<model>.
 base_url = "wss://api.x.ai/v1/realtime"
 
-# Prefer the XAI_API_KEY environment variable, or a systemd EnvironmentFile
-# outside the repository. Do not commit a key here. A TELEPHONE_AGENT_REALTIME__
-# API_KEY override also works.
+# Credential source. The adapter tries api_key, then api_key_command, then the
+# XAI_API_KEY environment variable. api_key and api_key_command are mutually
+# exclusive. Prefer api_key_command: it runs once per call and prints the token
+# on stdout, so a helper can follow credential rotation without a restart. The
+# command runs without a shell; put pipes in the helper script. Do not commit a
+# literal key here.
 # api_key = ""
+# api_key_command = "/home/you/bin/xai-token"
+# api_key_command_timeout_s = 5.0
 
 # Realtime model and built-in voice id.
 model = "grok-voice-latest"

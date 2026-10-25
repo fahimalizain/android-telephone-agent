@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import shlex
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
@@ -150,10 +151,13 @@ class RealtimeConfig:
     :class:`~telephone_agent.pipeline.Transcriber` or
     :class:`~telephone_agent.pipeline.Synthesizer`.
 
-    ``api_key`` may be empty. The adapter first uses this value, then the
-    ``XAI_API_KEY`` environment variable, so the key never has to live in the
-    repository or the TOML file. ``base_url`` is the WebSocket endpoint without
-    the model query parameter.
+    ``api_key`` may be empty. The adapter resolves the key in this order:
+    ``api_key``, then ``api_key_command``, then the ``XAI_API_KEY`` environment
+    variable, so the key never has to live in the repository or the TOML file.
+    ``api_key_command`` runs once per call and must print the token on stdout;
+    that lets a helper follow short-lived credential rotation without a daemon
+    restart. ``api_key`` and ``api_key_command`` are mutually exclusive.
+    ``base_url`` is the WebSocket endpoint without the model query parameter.
 
     ``greeting`` is an optional opening line. The adapter requests it once,
     after the call audio backend is ready, so a scheduled outbound call does not
@@ -164,6 +168,8 @@ class RealtimeConfig:
     kind: str = "off"
     base_url: str = "wss://api.x.ai/v1/realtime"
     api_key: str = field(default="", repr=False)
+    api_key_command: str = ""
+    api_key_command_timeout_s: float = 5.0
     model: str = "grok-voice-latest"
     voice: str = "eve"
     instructions: str = ""
@@ -454,6 +460,29 @@ def _validate_realtime(realtime: RealtimeConfig, audio: AudioConfig) -> None:
         )
     if realtime.kind == "off":
         return
+
+    if realtime.api_key.strip() and realtime.api_key_command.strip():
+        raise ConfigError(
+            "realtime.api_key and realtime.api_key_command are mutually exclusive; "
+            "use realtime.api_key_command so the credential can rotate"
+        )
+    if (
+        not math.isfinite(realtime.api_key_command_timeout_s)
+        or realtime.api_key_command_timeout_s <= 0
+    ):
+        raise ConfigError(
+            "realtime.api_key_command_timeout_s must be > 0 "
+            f"(got {realtime.api_key_command_timeout_s})"
+        )
+    if realtime.api_key_command.strip():
+        try:
+            command = shlex.split(realtime.api_key_command)
+        except ValueError as exc:
+            raise ConfigError(
+                f"realtime.api_key_command is not a valid command line: {exc}"
+            ) from exc
+        if not command:
+            raise ConfigError("realtime.api_key_command must not be empty")
 
     greeting = realtime.greeting.strip()
     if _CONTROL_CHARACTERS.search(realtime.greeting):
