@@ -150,7 +150,40 @@ monitor.bluez.properties = {
   bluez5.enable-msbc = true
   bluez5.enable-hw-volume = true
 }
+
+# Keep WirePlumber's linking policy off the call-scoped SCO nodes.
+#
+# The SCO source and sink are session items with node.autoconnect = true, so
+# during a call WirePlumber links them to the default devices: the remote
+# party's voice plays out of this host's speakers, and this host's microphone
+# is mixed into the uplink. The callee then hears the room around the host in
+# addition to whatever the agent plays.
+#
+# The agent links to these nodes explicitly (pw-record --target / pw-play
+# --target), so they need no default routing of their own. Setting
+# node.autoconnect = false leaves both directions empty until the agent opens
+# them, which is what a hands-free bridge wants.
+monitor.bluez.rules = [
+  {
+    matches = [
+      { node.name = "~bluez_input.*" }
+      { node.name = "~bluez_output.*" }
+    ]
+    actions = {
+      update-props = {
+        node.autoconnect = false
+      }
+    }
+  }
+]
 ```
+
+Without the `node.autoconnect = false` rule, WirePlumber treats the SCO nodes as
+ordinary streams and gives them the default routing. The uplink then carries the
+host microphone as well as the agent's playback, so the remote party hears the
+room, and the downlink plays out of the host speakers. The rule removes the
+default links; the agent still opens both directions explicitly during a call.
+`scripts/bluetooth-check.sh` reports any remaining link to a local device.
 
 Install it with the [setup script](../scripts/bluetooth-setup.sh):
 
@@ -300,6 +333,20 @@ requires both SCO nodes and fails when either is missing. If you omit the addres
 `BT_ADDRESS=AA:BB:CC:DD:EE:FF` or the script lists connected devices and exits 2. The
 output includes the node name, address, codec, profile, `media.role`, and `media.class`
 for each direction. A failure exits 1; a usage error exits 2.
+
+The full form also lists the PipeWire links that touch the SCO nodes and fails when one
+of them points at a local microphone or speaker:
+
+```text
+SCO links:
+  ok:    bluez_output.AA_BB_CC_DD_EE_FF.1 (sink) <-> pw-play (Stream/Output/Audio)
+  ok:    bluez_input.AA_BB_CC_DD_EE_FF.0 (source) <-> pw-record (Stream/Input/Audio)
+```
+
+`LEAK:` lines mean WirePlumber applied its default routing: the host microphone is mixed
+into the uplink, so the remote party hears the room, and the downlink plays on the host
+speakers. The `node.autoconnect = false` rule in the fragment prevents that. If the check
+reports a leak, reinstall the fragment and restart WirePlumber.
 
 ## 8. Test the audio path
 
@@ -485,6 +532,7 @@ journalctl --user -u telephone-agent-daemon.service -f
 | `pw-dump` fails or cannot connect to PipeWire | Agent runs as root or as a different user; no user session | `id`, `systemctl --user status pipewire`, `echo "$XDG_RUNTIME_DIR"` | Run the agent as the PipeWire user, use a user service, and enable lingering |
 | Node target not found after reconnect | The `.<id>` suffix changed | `pw-dump`, `wpctl status` | Rediscover by address and factory; do not hard-code `.0` or `.1` |
 | One direction is silent | Wrong node for the direction, or the phone route is wrong | Play the tone and record the downlink separately; check `media.class` | Downlink is `bluez_input` source; uplink is `bluez_output` sink; fix the route or target |
+| Remote party hears the host's room, or the downlink plays on the host speakers | WirePlumber auto-linked the SCO nodes to the default microphone and speakers | `./scripts/bluetooth-check.sh <mac>` during a call; look for `LEAK:` under `SCO links` | Install the repository fragment (`./scripts/bluetooth-setup.sh`) and restart WirePlumber |
 | Choppy audio, dropouts, or high latency | 2.4 GHz Wi-Fi coexistence, distance, or SCO retransmission | `pw-top`, `iw dev wlan0 link`, distance to the phone | Move the host and phone closer, change the Wi-Fi channel, reduce 2.4 GHz load |
 | Logs show CVSD instead of mSBC | Phone or adapter did not negotiate wideband | `./scripts/bluetooth-check.sh <mac>` during a call, or `wpctl inspect <node-id>` | No fix if the phone does not support it; the call still works at 8 kHz |
 | Agent reports an audio error when the call ends | SCO nodes disappeared with the call | Agent log, `pw-dump` after hangup | Expected; end the session cleanly and let the next call rediscover the nodes |

@@ -142,6 +142,7 @@ synchronized and the correct zone.
 | Symptom | Likely cause | Check | Fix |
 |---|---|---|---|
 | Echo on the call | Far-end speakerphone or a network echo path | Ask the far end to use a handset, check the phone route and open streams | Use a handset or headset at the far end; keep the barge-in guard |
+| Remote party hears the host's room, or the downlink plays on the host speakers | WirePlumber auto-linked the SCO nodes to the default microphone and speakers | `scripts/bluetooth-check.sh <mac>` during a call; look for `LEAK:` under `SCO links` | Install the repository WirePlumber fragment and restart WirePlumber |
 | Clipping or distortion | Playback gain too high or capture overloaded | Record the downlink, inspect RMS/dBFS with `selftest` or `sox ... stat` | Reduce TTS or playback gain, add headroom |
 | Dropouts and crackle | Bluetooth retransmission, Wi-Fi coexistence, CPU starvation | `pw-top`, `iw dev wlan0 link`, `top` | Move closer, change channel, stop background work |
 | Volume too low | Phone in-call volume or SCO gain | Phone call volume, `wpctl` volume for the SCO node | Raise the phone call volume, adjust gain |
@@ -153,7 +154,9 @@ than a clipped or delayed one.
 
 Echo is usually acoustic at the far end or a network reflection. Confirm that the host is
 not playing its capture back to the SCO sink and that the phone is not using its speaker
-alongside the Bluetooth route.
+alongside the Bluetooth route. WirePlumber does route the SCO nodes to the host's default
+microphone and speakers unless the fragment disables `node.autoconnect`; a `LEAK:` link in
+`scripts/bluetooth-check.sh` means that rule is not active.
 
 ## Collect diagnostics
 

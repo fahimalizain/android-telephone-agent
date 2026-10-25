@@ -92,6 +92,12 @@ The project is at alpha; minor versions may change APIs and file layout.
 
 ### Fixed
 
+- The WirePlumber fragment now disables `node.autoconnect` on the call-scoped SCO
+  nodes. Without it WirePlumber links the host microphone into the SCO sink and the
+  SCO source to the host speakers, so the remote party heard the room around the host
+  in addition to the agent's voice, and the downlink played locally. The Bluetooth
+  check script now reports any SCO link to a local microphone or speaker as a `LEAK:`
+  and fails, so the misconfiguration is caught before a call.
 - The dial helper no longer rejects `/call` from a stale ten-minute window. It checks
   Telecom call state before rejecting and clears the window on a refused hangup when no
   call is active.

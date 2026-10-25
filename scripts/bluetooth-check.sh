@@ -21,6 +21,7 @@ DUMP_FILE=""
 SCO_ROWS=""
 SOURCE_LINES=()
 SINK_LINES=()
+LINK_LINES=()
 
 usage() {
   cat <<'EOF'
@@ -37,7 +38,8 @@ Check the Bluetooth HFP Hands-Free link from this host to Phone A.
 
 Exit status:
   0  Adapter advertises Headset (0x1108) and Handsfree (0x111e), Phone A is
-     connected, and (unless --idle) both SCO nodes are present.
+     connected, and (unless --idle) both SCO nodes are present and are not
+     linked to a local microphone or speaker.
   1  A check failed or PipeWire could not be queried.
   2  Usage error, or no phone address was supplied.
 
@@ -178,21 +180,40 @@ def text(props, key):
     return str(value) if value not in (None, "") else "unknown"
 
 
+def props_of(obj):
+    info = obj.get("info")
+    props = info.get("props") if isinstance(info, dict) else None
+    if not isinstance(props, dict):
+        props = obj.get("props")
+    return props if isinstance(props, dict) else None
+
+
+# Map node id -> (node.name, media.class) so links can be named.
+nodes = {}
+for obj in objects:
+    if not isinstance(obj, dict):
+        continue
+    props = props_of(obj)
+    if props is None:
+        continue
+    node_id = obj.get("id")
+    if node_id is None:
+        continue
+    nodes[int(node_id)] = (text(props, "node.name"), text(props, "media.class"))
+
 roles = {
     "api.bluez5.sco.source": "source",
     "api.bluez5.sco.sink": "sink",
 }
 rows = []
 seen = set()
+sco_ids = {}
 
 for obj in objects:
     if not isinstance(obj, dict):
         continue
-    info = obj.get("info")
-    props = info.get("props") if isinstance(info, dict) else None
-    if not isinstance(props, dict):
-        props = obj.get("props")
-    if not isinstance(props, dict):
+    props = props_of(obj)
+    if props is None:
         continue
 
     kind = roles.get(props.get("factory.name"))
@@ -208,6 +229,8 @@ for obj in objects:
     if key in seen:
         continue
     seen.add(key)
+    if obj.get("id") is not None:
+        sco_ids[int(obj["id"])] = (kind, name)
     rows.append((
         0 if kind == "source" else 1,
         "\t".join((
@@ -220,6 +243,27 @@ for obj in objects:
             text(props, "media.class"),
         )),
     ))
+
+# Report every PipeWire link that touches an SCO node. WirePlumber must not
+# link these to the host's local devices; only the agent should.
+for obj in objects:
+    if not isinstance(obj, dict):
+        continue
+    props = props_of(obj)
+    if props is None:
+        continue
+    try:
+        out_id = int(props.get("link.output.node"))
+        in_id = int(props.get("link.input.node"))
+    except (TypeError, ValueError):
+        continue
+    for sco_id, peer_id in ((out_id, in_id), (in_id, out_id)):
+        entry = sco_ids.get(sco_id)
+        if entry is None:
+            continue
+        kind, sco_name = entry
+        peer_name, peer_class = nodes.get(peer_id, ("unknown", "unknown"))
+        rows.append((2, "\t".join(("link", kind, sco_name, peer_name, peer_class))))
 
 for _, row in sorted(rows, key=lambda item: item[0]):
     print(row)
@@ -248,6 +292,7 @@ split_sco_rows() {
 
   SOURCE_LINES=()
   SINK_LINES=()
+  LINK_LINES=()
   while IFS= read -r row; do
     [[ -n ${row} ]] || continue
     kind=$(row_field "${row}" 0)
@@ -258,11 +303,72 @@ split_sco_rows() {
       sink)
         SINK_LINES+=("${row}")
         ;;
+      link)
+        LINK_LINES+=("${row}")
+        ;;
       *)
         die "unexpected SCO row kind: ${kind}"
         ;;
     esac
   done <<<"${SCO_ROWS}"
+}
+
+# A local device node is what WirePlumber picks as a default target: an ALSA
+# microphone or speaker. Agent streams use Stream/* media classes instead.
+is_local_device() {
+  local name="$1"
+  local media_class="$2"
+
+  case "${media_class}" in
+    Audio/Source | Audio/Sink) return 0 ;;
+  esac
+  [[ ${name} == alsa_* ]]
+}
+
+# Print the links that touch the SCO nodes and fail when a local device is
+# attached. WirePlumber links the SCO nodes to the default source and sink
+# unless node.autoconnect is disabled, which mixes the host microphone into
+# the uplink and plays the downlink on the host speakers.
+print_links() {
+  local row=""
+  local kind=""
+  local sco=""
+  local peer=""
+  local peer_class=""
+  local leaks=0
+
+  printf '\nSCO links:\n'
+  if ((${#LINK_LINES[@]} == 0)); then
+    printf '  none (the agent links both directions explicitly when a call starts)\n'
+    return 0
+  fi
+
+  for row in "${LINK_LINES[@]}"; do
+    kind=$(row_field "${row}" 1)
+    sco=$(row_field "${row}" 2)
+    peer=$(row_field "${row}" 3)
+    peer_class=$(row_field "${row}" 4)
+    if is_local_device "${peer}" "${peer_class}"; then
+      printf '  LEAK:  %s (%s) is linked to local device %s (%s)\n' \
+        "${sco}" "${kind}" "${peer}" "${peer_class}"
+      leaks=$((leaks + 1))
+    else
+      printf '  ok:    %s (%s) <-> %s (%s)\n' "${sco}" "${kind}" "${peer}" "${peer_class}"
+    fi
+  done
+
+  if ((leaks > 0)); then
+    cat <<'EOF'
+
+WirePlumber is routing the call audio through this host's own devices.
+The remote party hears this host's microphone, and the downlink plays on the
+host speakers. Install the repository fragment and restart WirePlumber:
+
+  ./scripts/bluetooth-setup.sh
+EOF
+    return 1
+  fi
+  return 0
 }
 
 print_nodes() {
@@ -309,6 +415,7 @@ main() {
   local handsfree_ok=0
   local static_ok=0
   local sco_ok=0
+  local link_ok=1
   local positionals=0
 
   while (($# > 0)); do
@@ -470,8 +577,14 @@ main() {
     printf 'If a call is active, verify: systemctl --user status pipewire wireplumber\n'
   fi
 
-  if ((static_ok && sco_ok)); then
-    printf '\nResult: OK - HFP roles, phone connection, and both SCO nodes are present.\n'
+  if ((sco_ok)); then
+    if ! print_links; then
+      link_ok=0
+    fi
+  fi
+
+  if ((static_ok && sco_ok && link_ok)); then
+    printf '\nResult: OK - HFP roles, phone connection, both SCO nodes, and no local link.\n'
     exit 0
   fi
 

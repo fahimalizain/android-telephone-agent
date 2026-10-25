@@ -186,8 +186,15 @@ please continue" only if the callee is waiting; never replay the old reply.
 ## Echo and self-hearing
 
 Bluetooth HFP is not an acoustic path between the host and the phone's speaker.
-The SCO link carries the call audio directly, so the host's microphone is not
-part of the loop. There is no local speaker-to-microphone coupling on the host.
+The SCO link carries the call audio directly, so the agent's uplink is whatever
+it writes to the SCO sink. The host microphone is not part of the call **only
+when WirePlumber is told to leave the SCO nodes alone**: the SCO source and sink
+are session items with `node.autoconnect` enabled, so by default WirePlumber
+links the host microphone into the SCO sink and the SCO source to the host
+speakers. The remote party then hears the room around the host, and the downlink
+plays locally, which can also create a speaker-to-microphone loop. The repository
+WirePlumber fragment sets `node.autoconnect = false` for both SCO nodes, and
+`scripts/bluetooth-check.sh` reports a `LEAK:` link if the rule is missing.
 
 Echo can still occur. The far end may be on speakerphone, or the PSTN hybrid may
 reflect the agent's voice after a delay. Phone A may keep its own speaker or
