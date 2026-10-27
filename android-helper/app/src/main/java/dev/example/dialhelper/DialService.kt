@@ -60,6 +60,9 @@ class DialService : Service() {
     private const val CHANNEL_ID = "dial_helper"
     private const val NOTIFICATION_ID = 1001
 
+    /** DNS-SD instance name; Android may append a suffix on a conflict. */
+    private const val NSD_SERVICE_NAME = "android-telephone-agent-dialer"
+
     private const val MAX_LINE_BYTES = 2048
     private const val MAX_HEADER_COUNT = 64
     private const val MAX_BODY_BYTES = 4096
@@ -127,8 +130,16 @@ class DialService : Service() {
   @Volatile
   private var lastHangupAt = 0L
 
+  private lateinit var nsd: NsdAdvertiser
+
   override fun onCreate() {
     super.onCreate()
+    nsd = NsdAdvertiser(
+      this,
+      NSD_SERVICE_NAME,
+      PORT,
+      BuildConfig.VERSION_NAME
+    )
     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     manager.createNotificationChannel(
       NotificationChannel(
@@ -160,6 +171,7 @@ class DialService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onDestroy() {
+    nsd.stop()
     running.set(false)
     try {
       serverSocket?.close()
@@ -209,6 +221,9 @@ class DialService : Service() {
       serverSocket = server
       if (!running.get()) return
       Log.i(TAG, "listening on 0.0.0.0:$PORT")
+      // Best effort: registration failures are logged and never stop the
+      // HTTP listener.
+      nsd.start()
 
       while (running.get()) {
         val client = try {

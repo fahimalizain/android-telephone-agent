@@ -208,6 +208,10 @@ and `/answer`; neither returns a phone number.
 | `RECEIVE_BOOT_COMPLETED` | Normal, optional | Start the service after reboot |
 | `WAKE_LOCK` | Normal, optional | Only if a partial wake lock is added |
 
+DNS-SD registration uses Android's `NsdManager`, a system service; it adds no permission
+beyond the existing `INTERNET`. The helper does not use a multicast lock or read Wi-Fi
+state for advertisement.
+
 `READ_PHONE_STATE` is required by `TelephonyManager.callState` and by
 `getCallCapablePhoneAccounts()` unless the app is the default dialer. The helper also
 calls `TelecomManager.isInCall()` before trusting a stale call window and as the
@@ -238,6 +242,95 @@ Android 13+, the service still runs but its notification may not appear in the s
 
 A partial wake lock is optional; the phone charges with Stay awake enabled, so the
 reference takes none. If added, use a timeout and release it in `onDestroy()`.
+
+## mDNS/DNS-SD advertisement
+
+While the HTTP listener is running, `DialService` registers a DNS-SD service with
+Android's platform `NsdManager`:
+
+| Field | Value |
+|---|---|
+| Service type | `_http._tcp.` |
+| Instance name | `android-telephone-agent-dialer` |
+| Port | `8765` |
+| TXT records | `path=/`, `version=<versionName>` |
+
+Registration starts after the server socket is bound and is unregistered in
+`onDestroy()`. `NsdManager` is asynchronous, so a stop during registration is deferred
+until `onServiceRegistered`; the same listener is unregistered at most once. A failure
+is logged under tag `DialHelper` and never stops the HTTP listener. Android owns the
+advertised host record; the helper does not set a custom `.local` hostname. On a
+conflict Android may register `android-telephone-agent-dialer (1)`, and the log shows the
+actual instance name.
+
+No additional permission is needed: registration is performed by the system NSD service,
+and `INTERNET` is already declared for the socket. Only `path` and `version` are
+advertised. The token, SIM label, and phone numbers are never advertised or logged.
+mDNS advertises metadata only; it does not replace the bearer token, TLS, or the
+trusted-LAN restriction.
+
+Discover the service from the Linux host:
+
+```sh
+avahi-browse -rt _http._tcp
+# = wlan0 IPv4 android-telephone-agent-dialer _http._tcp local
+#   hostname = [Android.local]
+#   address = [192.168.1.50]
+#   port = [8765]
+#   txt = ["path=/" "version=0.1.0"]
+```
+
+Then use the resolved address and port with the existing bearer-token API:
+
+```sh
+export PHONE_IP=192.168.1.50
+export DIAL_TOKEN='replace-with-the-token-in-the-apk'
+curl -sS "http://$PHONE_IP:8765/health"
+curl -i -sS "http://$PHONE_IP:8765/state" \
+  -H "Authorization: Bearer $DIAL_TOKEN"
+```
+
+The same discovery with Python `zeroconf`:
+
+```python
+import time
+
+from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+
+
+class Listener(ServiceListener):
+    def add_service(self, zc, service_type, name):
+        info = zc.get_service_info(service_type, name)
+        if info is not None:
+            addresses = info.parsed_addresses()
+            ipv4 = [address for address in addresses if ":" not in address]
+            print(name, addresses, info.port, info.properties)
+            if ipv4:
+                print(f"http://{ipv4[0]}:{info.port}/health")
+
+    def update_service(self, zc, service_type, name):
+        pass
+
+    def remove_service(self, zc, service_type, name):
+        pass
+
+
+zc = Zeroconf()
+ServiceBrowser(zc, "_http._tcp.local.", Listener())
+try:
+    time.sleep(10)
+finally:
+    zc.close()
+```
+
+Using the returned hostname instead of an IP needs an mDNS resolver on the host (Avahi
+plus `nss-mdns`); the resolved address always works. `zeroconf` is a host-side discovery
+tool, not an agent dependency; install it separately, for example with
+`python -m pip install zeroconf`. The Python agent is unchanged and still uses the static
+`[dialer].url`; it does not browse for the service or switch endpoints automatically.
+Static IP or hostname configuration continues to work. Because Android can rename the
+instance on a conflict, browse by service type rather than assuming the exact instance
+name. See `android-helper/README.md` for a complete discovery example.
 
 ## Placing calls
 
@@ -339,6 +432,9 @@ the host; the cellular leg may stay up and billed until then.
   scheduled call per slot is enforced on the host.
 - Log through logcat tag `DialHelper`: start/stop, listen address, account label, outcome,
   failures. Never log numbers, bodies, or tokens.
+- DNS-SD advertisement is best effort. `NsdManager` registration is asynchronous; a
+  failure or OEM quirk is logged and does not affect HTTP serving. The host agent does
+  not consume the advertisement yet.
 - Do not hold a coroutine open for the call; placing or answering a call is a short IPC
   and the active window is a timestamp.
 - `/state` is side-effect free and safe to poll once per second while waiting for an
@@ -443,6 +539,10 @@ but never the caller or a number.
   keep-alive, no TLS, no rate limiting, and no replay protection. The parser handles
   `Content-Length` and caps lines and body size, but is not a general-purpose server.
 - The token is embedded in the APK and the port is fixed at 8765; changing either needs a rebuild.
+- DNS-SD advertisement is best effort and platform-dependent: Android may rename the
+  instance on a conflict, and some OEM `NsdManager` implementations are unreliable. The
+  Python agent still uses `[dialer].url` and does not discover or switch endpoints
+  automatically.
 
 ## Verification
 

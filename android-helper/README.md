@@ -35,6 +35,108 @@ It does not touch call audio. Audio is carried separately by Bluetooth HFP throu
 PipeWire. The helper is the call-state and signaling path; Bluetooth/PipeWire carries
 audio only, and HFP SCO nodes appear after a call is answered, not while it is ringing.
 
+## Service discovery (mDNS/DNS-SD)
+
+While the HTTP listener is running, `DialService` registers a DNS-SD service through
+Android's platform `NsdManager`:
+
+| Field | Value |
+|---|---|
+| Service type | `_http._tcp.` |
+| Instance name | `android-telephone-agent-dialer` |
+| Port | `8765` |
+| TXT records | `path=/`, `version=<versionName>` |
+
+Registration starts after the server socket is bound and is unregistered in
+`onDestroy()`. The callbacks are asynchronous: if the service stops while registration
+is still in flight, unregistration is deferred until Android reports the service as
+registered. A registration failure is logged under tag `DialHelper` and never stops the
+HTTP listener. Android chooses the advertised host record; the helper does not set a
+custom `.local` hostname. On a name conflict Android may register
+`android-telephone-agent-dialer (1)`; the actual instance name is logged. NSD is handled
+by the system service, so no permission is added beyond the existing `INTERNET`.
+
+Only service metadata is advertised. The token, SIM label, and phone number are never
+published or logged, and mDNS does not replace the bearer token, TLS, or the trusted-LAN
+restriction.
+
+### Discover from Linux
+
+`avahi-browse` from the `avahi-utils` package shows the instance, target host, address,
+port, and TXT records:
+
+```sh
+avahi-browse -rt _http._tcp
+# = wlan0 IPv4 android-telephone-agent-dialer _http._tcp local
+#   hostname = [Android.local]
+#   address = [192.168.1.50]
+#   port = [8765]
+#   txt = ["path=/" "version=0.1.0"]
+```
+
+Use the address and port with the existing token-protected API:
+
+```sh
+export PHONE_IP=192.168.1.50
+export DIAL_TOKEN="$(cat /scratch/android/dial-helper/token)"
+curl -sS "http://$PHONE_IP:8765/health"
+curl -i -sS "http://$PHONE_IP:8765/state" \
+  -H "Authorization: Bearer $DIAL_TOKEN"
+```
+
+Using the advertised hostname instead of the address requires an mDNS resolver on the
+host, such as Avahi with `nss-mdns`; the address always works.
+
+The same discovery with Python `zeroconf`:
+
+```python
+import time
+
+from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+
+
+class Listener(ServiceListener):
+    def add_service(self, zc, service_type, name):
+        info = zc.get_service_info(service_type, name)
+        if info is None:
+            return
+        addresses = info.parsed_addresses()
+        ipv4 = [address for address in addresses if ":" not in address]
+        print(name, addresses, info.port, info.properties)
+        if ipv4:
+            print(f"http://{ipv4[0]}:{info.port}/health")
+
+    def update_service(self, zc, service_type, name):
+        pass
+
+    def remove_service(self, zc, service_type, name):
+        pass
+
+
+zc = Zeroconf()
+browser = ServiceBrowser(zc, "_http._tcp.local.", Listener())
+try:
+    time.sleep(10)
+finally:
+    zc.close()
+```
+
+`zeroconf` is a host-side test tool, not an agent dependency; install it separately,
+for example with `python -m pip install zeroconf`. The Python agent is
+unchanged and still uses the static `[dialer].url`; it does not browse for or switch to
+the advertised service. Static IP or hostname configuration continues to work:
+
+```toml
+[dialer]
+url = "http://192.168.1.50:8765"
+```
+
+The TXT `version` value is the Android `versionName` (`0.1.0` in this tree). Because
+Android can rename the instance on a conflict, host-side code should browse by service
+type and check the port/TXT records rather than assume the exact instance name. OEM
+NSD implementations can also fall back to a generic name or behave differently; treat
+advertisement as best effort.
+
 ## Status
 
 The project builds and produces an installable APK. It has been smoke-tested on an
@@ -43,8 +145,10 @@ the call window, hangup responses, and the signed release APK. Outbound calls ha
 been exercised with a physical Galaxy A23 over Bluetooth HFP through the LAN helper. The
 `/state` and `/answer` paths compile and are covered by the build, and one live inbound
 PSTN call was answered through them on 2026-10-24. Treat permission prompts, real SIM-label
-routing, boot startup, actual hangup, answering from a locked screen, and vendor battery
-management as unverified until you test them on your device.
+routing, boot startup, actual hangup, answering from a locked screen, vendor battery
+management, and on-device NSD behavior as unverified until you test them on your device.
+The NSD advertisement compiles, but host-side discovery still needs a supervised test on
+the target phone and LAN.
 
 ## Project layout
 
@@ -64,6 +168,7 @@ android-helper/
     src/main/java/dev/example/dialhelper/
       DialService.kt
       MainActivity.kt
+      NsdAdvertiser.kt
     src/main/res/values/strings.xml
 ```
 
@@ -79,6 +184,8 @@ AppCompat dependency. It never reads or displays the API token.
 `DialService.kt` contains both the foreground service and the `BootReceiver` that the
 manifest registers for `BOOT_COMPLETED`. The receiver starts the service after a reboot
 on a best-effort basis; Android may refuse a foreground-service start from that context.
+`NsdAdvertiser.kt` owns the platform DNS-SD registration and its asynchronous callback
+lifecycle.
 
 Everything the build needs is already here. Do not create a new project, copy Kotlin
 files, or merge manifest fragments.

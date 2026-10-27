@@ -64,6 +64,11 @@ The project is at alpha; minor versions may change APIs and file layout.
   credential by running a helper once per call, so short-lived OAuth tokens can rotate
   without restarting the daemon. The command runs without a shell, prints one token on
   stdout, and is mutually exclusive with a literal `[realtime].api_key`.
+- Android helper DNS-SD advertisement through the platform `NsdManager`
+  (`_http._tcp.`, instance `android-telephone-agent-dialer`, port 8765, `path` and
+  `version` TXT records). It starts and stops with the foreground service, adds no
+  dependency or permission, and is best effort. The Python agent is unchanged and still
+  uses the static `[dialer].url`.
 
 ### Changed
 
